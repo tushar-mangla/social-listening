@@ -13,25 +13,24 @@ from .notion_sync import save_lead_to_notion
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 SUBREDDITS = [
-    "hiring",
-    "forhire",
-    "startups",
     "recruiting",
-    "sales",
+    "staffingagency",
+    "agencyowners",
+    "RecruitmentAgencies",
     "smallbusiness",
-    "RecruitmentAgencies"
+    "Entrepreneur"
 ]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
 }
 
-# Simple keyword-based analysis
+# Recruitment Agency BD & Hiring Intent keywords
 INTENT_KEYWORDS = {
-    "Agency_Seeking": ["looking for recruiter", "hiring agency", "recruitment agency", "help with hiring"],
-    "Vendor_Replacement_Pain": ["frustrated with", "current recruiter", "switching from", "unhappy with"],
-    "Hiring_Surge": ["hiring multiple", "scaling up", "growing team", "hiring surge"],
-    "Recruitment_Tech_Pain": ["ats recommendation", "recruitment software", "hiring tool", "crm for recruiting"]
+    "Agency_Seeking": ["looking for recruiter", "hiring agency", "recruitment agency", "staffing agency", "help with hiring"],
+    "Vendor_Replacement_Pain": ["frustrated with recruiter", "current recruiting agency", "switching recruiting tools", "unhappy with agency"],
+    "Hiring_Surge": ["hiring multiple", "scaling recruitment", "growing team", "hiring surge", "need recruiters"],
+    "Recruitment_Tech_Pain": ["ats recommendation", "recruitment software", "hiring tool", "crm for recruiting", "recruiter bd", "candidate matching"]
 }
 
 URGENCY_KEYWORDS = {
@@ -42,7 +41,7 @@ URGENCY_KEYWORDS = {
 
 def analyze_post(post):
     """
-    Analyzes a Reddit post from RSS feed to determine if it's a real lead and extracts relevant information.
+    Analyzes a Reddit post from RSS feed to determine if it's a real recruitment agency lead.
     Returns a lead dictionary or None.
     """
     text_content = post.get('text', '').lower()
@@ -78,15 +77,15 @@ def analyze_post(post):
     if company_match:
         company = company_match.group(1).strip().title()
 
-    role_match = re.search(r"(?i)(I'm a|I am a|my role is|founder|ceo|cto|hiring manager|recruiter)", full_text)
+    role_match = re.search(r"(?i)(I'm a|I am a|my role is|founder|ceo|principal|hiring manager|recruiter)", full_text)
     if role_match:
         author_role = role_match.group(1).strip().title()
 
     author = post.get("author", "Unknown").replace("/u/", "")
     
-    pain_summary = f"Seems to be experiencing challenges with {intent_type}."
-    value_prop = "Our agency specializes in connecting growing companies with top-tier talent, potentially saving you significant time and resources in your hiring process."
-    outreach_draft = f"Hi {author},\n\nI saw your post on Reddit regarding your hiring needs. {pain_summary} It sounds like you're looking for support with {intent_type}.\n\n{value_prop}\n\nWould you be open to a brief chat next week to explore how we can help you achieve your hiring goals?\n\nBest,"
+    pain_summary = f"Experiencing recruitment & hiring challenges ({intent_type})."
+    value_prop = "RecruitmentOS automates top-of-funnel BD for recruitment agencies — finding open jobs, matching idle ATS candidates with AI vector search, and handling personalized outreach."
+    outreach_draft = f"Hi {author},\n\nI saw your post on Reddit regarding your recruitment needs. {pain_summary}\n\n{value_prop}\n\nWould you be open to a quick 10-minute demo to see how RecruitmentOS can streamline your client BD and candidate sourcing?\n\nBest,"
 
     lead = {
         "author": author,

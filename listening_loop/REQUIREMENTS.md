@@ -8,33 +8,29 @@
 
 ## 1. ICP (who a "lead" is)
 
-**Owner or GM of a US local-service business** (roofing, solar, HVAC, painting) or a **recruitment/staffing agency principal**, expressing a problem our services solve: website/SEO, custom software, AI automation.
+**Founder, Owner, or Principal of a Recruitment or Staffing Agency** expressing a problem our services / RecruitmentOS solves: business development (BD), client acquisition, candidate sourcing automation, ATS integration, candidate neutralization/matching, or recruitment AI tools.
 
-Not ICP: practitioners (devs, marketers, other agencies), hobbyists, employees venting, students. A post asking "how do I build websites for clients" is a **competitor**, not a lead. This distinction is the #1 current failure mode.
+Not ICP: individual job seekers, internal corporate recruiters, HR generalists, devs, generic marketing agencies, or freelancers. This distinction is the #1 current failure mode.
 
 ---
 
 ## 2. R1 — Source targeting
 
-**Requirement:** every lead-feed source must be a place where ICP *owners* post, not where our craft is discussed. Craft/trend sources are allowed but must be tagged `trend`, never scored for leads.
+**Requirement:** every lead-feed source must be a place where **Recruitment / Staffing Agency Founders & Principals** post.
 
 ### 2.1 Reddit lead sources
 
 | Subreddit | Rationale | Status |
 |---|---|---|
-| r/sweatystartup | local-service owner-operators, marketing/website questions constantly | **verified live 2026-08-22** (RSS fetched, owner post about cleaning-business website) |
-| r/smallbusiness | keep — broad but real owners | already in config |
-| r/Entrepreneur | keep on probation — noisy, audit at week 2 | already in config |
-| r/Contractor | GC/trade owners | verify via RSS before trusting |
-| r/Roofing | mixed techs+owners; owners ask marketing Qs | verify |
-| r/HVAC | mixed; probation | verify |
-| r/solar | mixed industry/consumer; probation | verify |
-| r/recruiting | agency recruiters + founders | verify |
-| r/agencyowners / r/staffingagency | if exists/active | verify |
+| r/recruiting | agency recruiters + staffing agency founders | **primary** |
+| r/staffingagency | dedicated staffing agency owners & founders | **primary** |
+| r/agencyowners | agency principals discussing BD, operations & tooling | **verified** |
+| r/Entrepreneur | business owners discussing hiring & agency help | probation |
+| r/smallbusiness | business owners seeking recruiting agency support | probation |
 
-**Remove from lead feed:** r/webdev, r/web_design, r/agency, r/automation, r/artificial, r/SaaS → move to `TREND_SUBREDDITS` feeding `daily.py` only.
+**Remove from lead feed:** r/webdev, r/web_design, r/automation, r/artificial, r/SaaS → move to `TREND_SUBREDDITS` feeding `daily.py` only.
 
-**Verification protocol (per candidate, uses existing RSS fetcher):** pull `/new/.rss` once; PASS if ≥10 posts in last 7 days AND ≥2 of newest 25 are owner-voice ("my business/my crew/my customers"). FAIL → drop, log why in config comment.
+**Verification protocol (per candidate, uses existing RSS fetcher):** pull `/new/.rss` once; PASS if ≥10 posts in last 7 days AND ≥2 of newest 25 are recruitment agency owner-voice ("my agency / candidate placement / client BD / ATS"). FAIL → drop, log why in config comment.
 
 Config implements this as `LEAD_SUBREDDITS` + `TREND_SUBREDDITS` (see `config.py`).
 
@@ -42,12 +38,12 @@ Config implements this as `LEAD_SUBREDDITS` + `TREND_SUBREDDITS` (see `config.py
 
 Fact: public keyword search (current opencli path) skims strangers' public posts; real ICP density is in **closed groups**, which require a joined member account.
 
-- **FR-1.1:** Rewrite `FACEBOOK_QUERIES` vertical-first, owner-voice: `roofing business slow season leads`, `hvac company website customers`, etc. Service-first queries ("need a website") attract freelancer spam — demoted.
-- **FR-1.2:** With founder profile, manually join 5–8 owner groups (search FB for: "Roofing business owners", "HVAC business owners", "Painting contractors business", "Recruitment agency owners", "Solar sales professionals"; pick size >5k + posts today). Group monitoring stays **manual, 15 min/day** — logged-in scraping of joined groups risks the profile needed for posting.
+- **FR-1.1:** Rewrite `FACEBOOK_QUERIES` recruitment agency-first, owner-voice: `recruitment agency BD`, `staffing agency client acquisition`, `ATS candidate matching`, `recruiter cold outreach`, etc.
+- **FR-1.2:** With founder profile, manually join 5–8 recruitment owner groups (search FB for: "Recruitment Agency Owners", "Staffing Agency Owners & Founders", "Recruiter BD & Sales", "Independent Recruiters Network"). Group monitoring stays **manual, 15 min/day** — logged-in scraping of joined groups risks the profile needed for posting.
 
 ### 2.3 Acceptance for R1
 
-After 14 days: manual audit of `leads.csv` → **≥5 true ICP leads/week and ≥40% precision** among qualified rows. Below that, fix sources before touching any other layer.
+After 14 days: manual audit of `leads.csv` → **≥5 true ICP recruitment leads/week and ≥40% precision** among qualified rows. Below that, fix sources before touching any other layer.
 
 ---
 

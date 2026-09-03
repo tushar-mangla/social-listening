@@ -10,8 +10,22 @@ PLATFORMS = [
     "reddit"
 ]
 
-# Keywords to search for
-# Using a list of phrases to be joined with OR
+# Targeted subreddits for recruitment/staffing agency owners & hiring managers
+LEAD_SUBREDDITS = [
+    "recruiting",
+    "staffingagency",
+    "agencyowners",
+    "smallbusiness",
+    "Entrepreneur"
+]
+
+TREND_SUBREDDITS = [
+    "webdev",
+    "SaaS",
+    "automation"
+]
+
+# Search keywords targeting recruitment agency BD & hiring pain points
 KEYWORDS = [
     "need a recruiter",
     "need recruiting help",
@@ -22,7 +36,11 @@ KEYWORDS = [
     "hiring is hard",
     "looking for talent",
     "recruiting software",
-    "applicant tracking system"
+    "applicant tracking system",
+    "recruitment agency BD",
+    "staffing agency client acquisition",
+    "recruiter cold email",
+    "ATS candidate matching"
 ]
 
 QUALIFYING_KEYWORDS = (
@@ -33,8 +51,13 @@ QUALIFYING_KEYWORDS = (
     "can't find candidates",
     "candidate ghosting",
     "hiring is hard",
+    "looking for talent",
     "recruiting software",
     "applicant tracking system",
+    "recruitment agency BD",
+    "staffing agency",
+    "recruitment agency",
+    "recruiter",
 )
 
 EXCLUDED_KEYWORDS = (
@@ -43,4 +66,8 @@ EXCLUDED_KEYWORDS = (
     "my resume",
     "job application",
     "seeking employment",
+    "hire me",
+    "i am looking for work",
+    "entry level resume",
 )
+
