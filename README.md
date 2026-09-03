@@ -1,143 +1,64 @@
-# Social Listening & Lead Intelligence Engine
+# RecruitmentOS Lead Collector
 
-Automated social listening, keyword & LLM intent scoring, and lead dispatch engine for local service businesses and agencies.
+Collect recruitment-related posts from supported OpenCLI platforms, keep recent and likely qualified leads, store them locally in SQLite, and optionally sync them to Notion.
 
-Monitors Reddit (RSS + API), Twitter/X, Facebook, and YouTube to extract high-intent leads, synthesize daily content briefs, and deliver alerts directly to Telegram.
-
----
-
-## System Architecture
+## Workflow
 
 ```text
-social_listening/
-├── listening-loop/           # Core Python automation loop & scoring engine
-│   ├── config.py             # Seed keywords, subreddits, queries, LLM & pacing knobs
-│   ├── digest.py             # 3-hour cycle: fetch -> score -> filter -> digest & leads.csv
-│   ├── daily.py              # 21:00 daily brief & LinkedIn/Twitter/Reddit angle generator
-│   ├── weekly.py             # Weekly pain-theme clustering & ICP review
-│   ├── telegram.py           # Telegram bot notification sender
-│   ├── install-scheduler.sh  # Dynamic launchd (macOS) / cron (Linux) scheduler setup
-│   └── data/                 # Output digests, golden test set, and deduplication state
-│
-├── Social-ops/               # [Submodule] FastMCP data collection backend (:8097) & Console (:8088)
-├── snscrape/                 # [Submodule/Library] Twitter/social fallback scraper
-├── .env.example              # Unified environment configuration template
-└── README.md                 # Team onboarding documentation
+OpenCLI -> 24-hour filter -> recruitment qualification -> SQLite deduplication -> optional Notion sync
 ```
 
----
+There are no local platform scrapers. OpenCLI is the only collection interface.
 
-## Prerequisites
-
-- **Python 3.10+** (stdlib-only design; no complex dependencies required)
-- **Docker & Docker Desktop** (to run the `Social-ops` collector service)
-- **opencli** (optional, for browser-session Reddit/Twitter/Facebook search):
-  ```bash
-  npm install -g opencli
-  ```
-- **yt-dlp** (optional, for YouTube transcript parsing in daily briefs):
-  ```bash
-  brew install yt-dlp   # macOS
-  # or pip install yt-dlp
-  ```
-
----
-
-## 5-Minute Quickstart
-
-### 1. Clone the Repository (with Submodules)
+## Setup
 
 ```bash
-git clone --recurse-submodules <REPO_URL>
-cd social_listening
-```
-*(If already cloned without submodules, run `git submodule update --init --recursive`)*
-
-### 2. Configure Environment
-
-Copy the example configuration to `.env`:
-
-```bash
+python3 -m venv venv
+venv/bin/python -m pip install -r requirements.txt
 cp .env.example .env
+npm install -g opencli
 ```
 
-Configure your credentials:
-1. **Telegram:** Message [@BotFather](https://t.me/BotFather) for `TELEGRAM_BOT_TOKEN`, and [@userinfobot](https://t.me/userinfobot) for `TELEGRAM_CHAT_ID`.
-2. **Reddit API (free):** Create a script app at [Reddit App Preferences](https://www.reddit.com/prefs/apps) and set `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET`.
-3. **Apify (optional):** Add `APIFY_API_TOKEN` for Facebook / fallback scrapers.
-
-### 3. Start Data Collector Service (Docker)
+Log in to each OpenCLI platform you want to use:
 
 ```bash
-cd Social-ops
-cp ../.env .env
-docker compose up -d
-docker compose ps
-cd ..
-```
-Verify `social-ops-mcp` is running on `http://localhost:8097` and setup console on `http://localhost:8088`.
-
-### 4. Test the Pipeline
-
-Run self-test and dry-run (safe to run without live credentials):
-
-```bash
-cd listening-loop
-
-# 1. Run scoring & golden fixture self-test
-python3 digest.py --self-test
-
-# 2. Run a dry-run digest (writes data/digest.md and data/leads.csv)
-python3 digest.py --dry-run
-
-# 3. Test daily content brief generator
-python3 daily.py --dry-run
-
-# 4. Run live one-cycle pass
-bash run.sh
+opencli reddit login
+opencli twitter login
+opencli facebook login
 ```
 
----
+Notion is optional. Set `NOTION_API_KEY` and `NOTION_DATABASE_ID` in `.env` to sync newly collected leads after they are stored in SQLite.
 
-## Scheduling Automation
-
-To run the 3-hour digest and the 21:00 daily brief automatically:
-
-### macOS (Launchd) / Linux (Cron)
-Run the auto-installer script from inside `listening-loop`:
+## Run Once
 
 ```bash
-cd listening-loop
-bash install-scheduler.sh
+venv/bin/python -m listening_loop.run
 ```
 
-- **macOS:** Automatically creates and loads `~/Library/LaunchAgents/com.social-listening.digest.plist` and `com.social-listening.daily.plist` with dynamic system paths.
-- **Linux:** Outputs the exact crontab entries to paste into `crontab -e`.
-
-Logs are written to `listening-loop/data/launchd.log` and `listening-loop/data/daily.log`.
-
----
-
-## Customizing Target Audience & Keywords
-
-All vertical search terms, intent phrases, and subreddits are defined in `listening-loop/config.py`:
-
-- `LEAD_SUBREDDITS`: Communities where business owners discuss problems (e.g. `r/sweatystartup`, `r/Roofing`, `r/HVAC`).
-- `WEBSITE_KEYWORDS` & `AI_KEYWORDS`: Weighted intent terms (e.g. *"web developer disappeared"*, *"need a website"*, *"automate my business"*).
-- `FACEBOOK_QUERIES` & `TWITTER_QUERIES`: Rotated intent queries.
-- `LLM_BASE_URL` & `LLM_MODEL`: LLM endpoint for semantic classification and angle generation.
-
----
-
-## Submodule Management for Maintainers
-
-If submodules need updating or re-syncing:
+Useful options:
 
 ```bash
-# Pull latest submodule updates
-git submodule update --remote --merge
+venv/bin/python -m listening_loop.run --hours 5
+venv/bin/python -m listening_loop.run --platform reddit
+venv/bin/python -m listening_loop.run --dry-run
+```
 
-# Commit submodule pointer changes
-git add Social-ops snscrape
-git commit -m "chore: update submodules"
+`--dry-run` still stores new leads in SQLite but skips the optional Notion sync. The database is `social_listening.db` in the project root, and leads are deduplicated by OpenCLI post ID.
+
+## Schedule
+
+On macOS, install the three-hour launchd job:
+
+```bash
+bash listening_loop/install-scheduler.sh
+```
+
+The scheduler runs the same `listening_loop.run` command as a one-time execution. It does not run separate digest, Telegram, YouTube, RSS, or local scraper jobs.
+
+## Configuration and tests
+
+Edit `listening_loop/config.py` to change platforms and recruitment-intent search terms. Obvious job-seeker posts are excluded before database insertion.
+
+```bash
+venv/bin/python -m pytest -q
 ```

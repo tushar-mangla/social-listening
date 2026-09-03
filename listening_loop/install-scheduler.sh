@@ -5,8 +5,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PYTHON_EXE="$(which python3)"
+PROJECT_ROOT="$(cd "$HERE/.." && pwd)"
+PYTHON_EXE="$PROJECT_ROOT/venv/bin/python"
 BASH_EXE="$(which bash)"
+
+if [[ ! -x "$PYTHON_EXE" ]]; then
+  echo "Error: expected virtual-environment Python at $PYTHON_EXE" >&2
+  echo "Create it with: python3 -m venv $PROJECT_ROOT/venv" >&2
+  exit 1
+fi
 
 echo "=== Social Listening Scheduler Setup ==="
 echo "Project Directory: $HERE"
@@ -25,11 +32,6 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.social-listening.digest</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:$HOME/.npm-global/bin:$PATH</string>
-    <key>HOME</key><string>$HOME</string>
-  </dict>
   <key>ProgramArguments</key><array>
     <string>$BASH_EXE</string>
     <string>$HERE/run.sh</string>
@@ -42,44 +44,14 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
 </plist>
 EOF
 
-  # Daily plist (21:00)
-  DAILY_PLIST="$HOME/Library/LaunchAgents/com.social-listening.daily.plist"
-  cat <<EOF > "$DAILY_PLIST"
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.social-listening.daily</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:$HOME/.npm-global/bin:$PATH</string>
-    <key>HOME</key><string>$HOME</string>
-  </dict>
-  <key>ProgramArguments</key><array>
-    <string>$PYTHON_EXE</string>
-    <string>$HERE/daily.py</string>
-  </array>
-  <key>StartCalendarInterval</key><dict>
-    <key>Hour</key><integer>21</integer>
-    <key>Minute</key><integer>0</integer>
-  </dict>
-  <key>StandardOutPath</key><string>$HERE/data/daily.log</string>
-  <key>StandardErrorPath</key><string>$HERE/data/daily.log</string>
-</dict>
-</plist>
-EOF
-
   launchctl unload "$DIGEST_PLIST" 2>/dev/null || true
-  launchctl unload "$DAILY_PLIST" 2>/dev/null || true
   launchctl load "$DIGEST_PLIST"
-  launchctl load "$DAILY_PLIST"
-  echo "✅ Launchd agents loaded successfully!"
+  echo "✅ OpenCLI lead scheduler loaded successfully!"
   echo "Check logs with: tail -f $HERE/data/launchd.log"
 
 else
   echo "Detected Linux / Unix. Add the following to your crontab (crontab -e):"
   echo ""
   echo "0 */3 * * * $BASH_EXE $HERE/run.sh >> $HERE/data/cron.log 2>&1"
-  echo "0 21 * * * $PYTHON_EXE $HERE/daily.py >> $HERE/data/daily.log 2>&1"
   echo ""
 fi
