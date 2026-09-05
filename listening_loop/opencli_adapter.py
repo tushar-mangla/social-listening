@@ -3,6 +3,16 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Union
 
+
+def _safe_error(value: object) -> str:
+    """Canonical redaction + bound for logged subprocess diagnostics."""
+    try:
+        from listening_loop.qualification import sanitize_error_message
+
+        return sanitize_error_message(value)
+    except Exception:
+        return str(value).replace("\n", " ").replace("\r", " ")[:300]
+
 def run_opencli(platform: str, query: str) -> list[dict]:
     """
     Runs the opencli command with the specified platform and query,
@@ -17,9 +27,14 @@ def run_opencli(platform: str, query: str) -> list[dict]:
             command,
             capture_output=True,
             text=True,
-            check=True,
-            encoding='utf-8'
+            check=False,
+            encoding='utf-8',
+            timeout=60,
         )
+        if process.returncode != 0:
+            # Never emit raw stderr: it can contain post bodies or raw JSON.
+            print(f"[OpenCLI warning] {platform} process failed with returncode {process.returncode}")
+            return []
         
         output = process.stdout.strip()
         if not output:
@@ -27,26 +42,32 @@ def run_opencli(platform: str, query: str) -> list[dict]:
 
         try:
             parsed = json.loads(output)
-            return parsed if isinstance(parsed, list) else [parsed]
+            candidates = parsed if isinstance(parsed, list) else [parsed]
+            return [item for item in candidates if isinstance(item, dict)]
         except json.JSONDecodeError:
             # Some OpenCLI versions emit one JSON object per line.
             results = []
             for line in output.splitlines():
                 try:
-                    results.append(json.loads(line))
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        results.append(item)
                 except json.JSONDecodeError:
-                    print(f"Warning: Could not decode JSON line: {line}")
+                    # Never dump raw malformed JSON (may contain post content).
+                    print("Warning: Could not decode JSON line; skipping malformed line.")
             return results
 
     except FileNotFoundError:
         print("Error: 'opencli' command not found. Make sure it is installed and in your PATH.")
         return []
     except subprocess.CalledProcessError as e:
-        print(f"Error executing opencli: {e}")
-        print(f"Stderr: {e.stderr}")
+        print(f"Error executing opencli: {_safe_error(e)}")
+        return []
+    except subprocess.TimeoutExpired:
+        print("Error: opencli timed out after 60 seconds.")
         return []
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"An unexpected error occurred: {_safe_error(e)}")
         return []
 
 def parse_timestamp(timestamp_val: Union[str, int, float, None]) -> Union[datetime, None]:
@@ -94,7 +115,7 @@ def parse_timestamp(timestamp_val: Union[str, int, float, None]) -> Union[dateti
             except (ValueError, TypeError):
                 continue
 
-    print(f"Warning: Could not parse timestamp: {timestamp_val}")
+    print("Warning: Could not parse timestamp; skipping unsupported timestamp format.")
     return None
 
 def fetch_leads(platform: str, keywords: list[str], lookback_hours: int = 5) -> list[dict]:
@@ -108,6 +129,8 @@ def fetch_leads(platform: str, keywords: list[str], lookback_hours: int = 5) -> 
     time_limit = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
     
     for post in raw_posts:
+        if not isinstance(post, dict):
+            continue
         post_id = post.get("id_str") or post.get("id") or post.get("url")
         if not post_id:
             continue
@@ -126,12 +149,18 @@ def fetch_leads(platform: str, keywords: list[str], lookback_hours: int = 5) -> 
         if not posted_at or posted_at < time_limit:
             continue
             
+        user = post.get("user")
+        author = post.get("author") or post.get("username")
+        if not author and isinstance(user, dict):
+            author = user.get("name") or user.get("username")
+
         leads.append({
             "post_id": str(post_id),
             "source": platform,
             "content": content,
             "url": post.get("url"),
             "posted_at": posted_at,
+            "author": author,
         })
             
     return leads

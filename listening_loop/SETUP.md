@@ -1,6 +1,6 @@
 # Setup
 
-This package has one collection path: OpenCLI to SQLite, with optional Notion sync.
+This package has one canonical collection path: OpenCLI to keyword gate to Codex Everywhere LLM qualification to SQLite, with optional Notion sync.
 
 ## Install
 
@@ -29,7 +29,7 @@ venv/bin/python -m listening_loop.run
 
 The default lookback is 24 hours. Override it with `--hours 5` or another positive number. Restrict collection with `--platform reddit`, `twitter`, `facebook`, or `linkedin`.
 
-New qualified posts are stored in `social_listening.db`. The collector rejects obvious job-seeker posts and deduplicates by post ID.
+All keyword candidates are stored in `social_listening.db` with classifier status and bounded failure details. Only `qualified` rows are eligible for Notion. The collector rejects obvious job-seeker, internal-recruiter, and resume-advice posts before calling the provider and deduplicates by post ID.
 
 ## Optional Notion sync
 
@@ -41,6 +41,12 @@ NOTION_DATABASE_ID=...
 ```
 
 Without those values, collection still works and leads remain in SQLite. Use `--dry-run` to explicitly skip Notion sync for a run.
+
+## Codex Everywhere qualifier
+
+Set `CODEX_EVERYWHERE_API_KEY` in the project `.env`. Verified non-secret defaults are base URL `https://codex-easy.ai/v1` (chat URL `{base}/chat/completions`) and model `gpt-5.6-luna` (override with `CODEX_EVERYWHERE_BASE_URL` / `CODEX_EVERYWHERE_MODEL`). Provider timeouts, connection failures, HTTP failures, and malformed responses are retained locally as `provider_error` or `unclassified` with bounded diagnostics, attempt counts, and retry scheduling; no failure row is sent to Notion. Qualified rows are never downgraded and remain syncable.
+
+`fetch_and_sync_real_leads.py` is an unchanged, separate RSS helper. Do not treat it as part of the canonical SQLite classifier pipeline.
 
 ## Scheduler
 

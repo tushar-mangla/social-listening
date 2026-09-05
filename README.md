@@ -5,7 +5,7 @@ Collect recruitment-related posts from supported OpenCLI platforms, keep recent 
 ## Workflow
 
 ```text
-OpenCLI -> 24-hour filter -> recruitment qualification -> SQLite deduplication -> optional Notion sync
+OpenCLI -> 24-hour filter -> keyword gate -> Codex Everywhere LLM qualification -> SQLite -> optional Notion sync
 ```
 
 There are no local platform scrapers. OpenCLI is the only collection interface.
@@ -27,7 +27,7 @@ opencli twitter login
 opencli facebook login
 ```
 
-Notion is optional. Set `NOTION_API_KEY` and `NOTION_DATABASE_ID` in `.env` to sync newly collected leads after they are stored in SQLite.
+Notion is optional. Set `NOTION_API_KEY` and `NOTION_DATABASE_ID` in `.env` to sync qualified leads after they are stored in SQLite. Set `CODEX_EVERYWHERE_API_KEY` in `.env` to enable LLM qualification; the verified defaults are base URL `https://codex-easy.ai/v1` and model `gpt-5.6-luna` (override with `CODEX_EVERYWHERE_BASE_URL` / `CODEX_EVERYWHERE_MODEL`). Only setting names and defaults are documented; never commit keys.
 
 ## Run Once
 
@@ -43,7 +43,9 @@ venv/bin/python -m listening_loop.run --platform reddit
 venv/bin/python -m listening_loop.run --dry-run
 ```
 
-`--dry-run` still stores new leads in SQLite but skips the optional Notion sync. The database is `social_listening.db` in the project root, and leads are deduplicated by OpenCLI post ID.
+`--dry-run` still stores classified posts in SQLite but skips the optional Notion sync. The database is `social_listening.db` in the project root, and leads are deduplicated by OpenCLI post ID.
+
+Each keyword candidate receives a durable classifier state: `qualified`, `not_qualified`, `unclassified`, or `provider_error`. Only qualified rows are eligible for Notion sync. Provider and malformed-response failures remain in SQLite with bounded error detail, attempt counts, and scheduled retry metadata; they are never treated as qualified. A qualified row is never downgraded by a later failure (monotonic retention) and stays syncable. After bounded consecutive provider failures, the run uses keyword-only fallback for remaining candidates.
 
 ## Schedule
 
@@ -57,7 +59,9 @@ The scheduler runs the same `listening_loop.run` command as a one-time execution
 
 ## Configuration and tests
 
-Edit `listening_loop/config.py` to change platforms and recruitment-intent search terms. Obvious job-seeker posts are excluded before database insertion.
+Edit `listening_loop/config.py` to change platforms and recruitment-intent search terms. Obvious job-seeker, internal-recruiter, and resume-advice posts are excluded before classifier requests.
+
+`listening_loop/fetch_and_sync_real_leads.py` is a separate legacy RSS-to-Notion utility. It is not part of the OpenCLI -> SQLite -> Codex Everywhere pipeline and remains unchanged.
 
 ```bash
 venv/bin/python -m pytest -q

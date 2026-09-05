@@ -9,6 +9,16 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN") or os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 
+def _safe_error(value: object) -> str:
+    """Route exception text through the canonical sanitizer before logging."""
+    try:
+        from listening_loop.qualification import sanitize_error_message
+
+        return sanitize_error_message(value)
+    except Exception:
+        return str(value).replace("\n", " ").replace("\r", " ")[:300]
+
+
 def _notion_date(value):
     """Return an ISO timestamp for datetime or SQLite string values."""
     if not value:
@@ -68,7 +78,7 @@ def build_notion_properties(lead: dict) -> dict:
     if posted_at_iso:
         properties["Posted At"] = {"date": {"start": posted_at_iso}}
 
-    summary = lead.get("summary") or lead.get("content")
+    summary = lead.get("one_line") or lead.get("summary") or lead.get("content")
     if summary:
         properties["Summary"] = {"rich_text": [{"text": {"content": summary[:2000]}}]}
 
@@ -78,8 +88,12 @@ def build_notion_properties(lead: dict) -> dict:
     if lead.get("author_role") and lead["author_role"] != "N/A":
         properties["Author Role"] = {"rich_text": [{"text": {"content": lead["author_role"][:2000]}}]}
 
-    if lead.get("score") is not None:
-        properties["Score"] = {"number": lead["score"]}
+    score = lead.get("score") if lead.get("score") is not None else lead.get("keyword_score")
+    if score is not None:
+        try:
+            properties["Score"] = {"number": float(score)}
+        except (TypeError, ValueError):
+            pass
 
     if lead.get("intent_type"):
         properties["Intent Type"] = {"select": {"name": lead["intent_type"]}}
@@ -132,13 +146,15 @@ def sync_leads_to_notion(leads: list[dict]) -> list[int]:
     for lead in leads:
         lead_id = lead.get("id")
         try:
-            save_lead_to_notion(lead)
-            if lead_id is not None:
+            page_id = save_lead_to_notion(lead)
+            if page_id and lead_id is not None:
                 synced_lead_ids.append(lead_id)
-            print(f"Successfully synced lead {lead_id or lead.get('post_id')} to Notion.")
+                print(f"Successfully synced lead {_safe_error(lead_id or lead.get('post_id'))} to Notion.")
+            elif not page_id:
+                print(f"Lead {_safe_error(lead_id or lead.get('post_id'))} was not synced to Notion.")
         except APIResponseError as e:
-            print(f"Error syncing lead {lead_id}: {e}")
+            print(f"Error syncing lead {lead_id}: {_safe_error(e)}")
         except Exception as e:
-            print(f"An unexpected error occurred while syncing lead {lead_id}: {e}")
+            print(f"An unexpected error occurred while syncing lead {lead_id}: {_safe_error(e)}")
             
     return synced_lead_ids
