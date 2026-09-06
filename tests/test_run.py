@@ -3,6 +3,12 @@ from listening_loop import run
 from listening_loop import qualification
 
 
+def _set_dry_run_argv(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["run", "--dry-run"])
+
+
 def lead(post_id, content="My staffing agency needs candidate matching automation."):
     return {
         "post_id": post_id,
@@ -111,7 +117,7 @@ def test_main_dry_run_skips_notion_but_persists(monkeypatch):
     monkeypatch.setattr(run.config, "PLATFORMS", ["reddit"])
     monkeypatch.setattr(run.opencli_adapter, "fetch_leads", lambda *a, **k: [lead("dry")])
     monkeypatch.setattr(run, "is_qualified_candidate", lambda l: True)
-    monkeypatch.setattr(run, "classify_and_store", lambda leads: 1)
+    monkeypatch.setattr(run, "classify_and_store", lambda leads, *args, **kwargs: 1)
     monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: (_ for _ in ()).throw(AssertionError("should not query")))
     monkeypatch.setattr(
         run.notion_sync, "sync_leads_to_notion",
@@ -132,8 +138,79 @@ def test_main_continues_across_platform_failure(monkeypatch):
 
     monkeypatch.setattr(run.opencli_adapter, "fetch_leads", flaky_fetch)
     monkeypatch.setattr(run, "is_qualified_candidate", lambda l: True)
-    monkeypatch.setattr(run, "classify_and_store", lambda leads: 1 if leads and leads[0]["post_id"] == "ok" else 0)
+    monkeypatch.setattr(run, "classify_and_store", lambda leads, *args, **kwargs: 1 if leads and leads[0]["post_id"] == "ok" else 0)
     monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: [])
     import sys
     monkeypatch.setattr(sys, "argv", ["run"])
     run.main()
+
+
+def test_main_skips_discovered_leads_when_status_lookup_fails(monkeypatch, capsys):
+    monkeypatch.setattr(run.config, "PLATFORMS", ["twitter"])
+    monkeypatch.setattr(run.config, "DISCOVERY_QUERIES", {"family": ["query"]})
+    monkeypatch.setattr(run.opencli_adapter, "fetch_leads", lambda *args: [lead("unknown")])
+    monkeypatch.setattr(run, "is_qualified_candidate", lambda candidate: True)
+    monkeypatch.setattr(
+        run.database,
+        "get_existing_status_map",
+        lambda ids: (_ for _ in ()).throw(RuntimeError("database credentials leaked")),
+    )
+    monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
+    monkeypatch.setattr(
+        run,
+        "classify_and_store",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not classify")),
+    )
+    _set_dry_run_argv(monkeypatch)
+
+    run.main()
+
+    output = capsys.readouterr().out
+    assert "Database status lookup unavailable" in output
+    assert "database credentials leaked" not in output
+    assert '"database_errors": 1' in output
+    assert '"classification_skipped_database_status": 1' in output
+
+
+def test_main_runs_all_queries_unscoped_for_non_reddit_platform(monkeypatch):
+    monkeypatch.setattr(run.config, "PLATFORMS", ["twitter"])
+    calls = []
+
+    def fetch(platform, query, hours, community, family):
+        calls.append((platform, query, hours, community, family))
+        return []
+
+    monkeypatch.setattr(run.opencli_adapter, "fetch_leads", fetch)
+    monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {})
+    monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
+    _set_dry_run_argv(monkeypatch)
+
+    run.main()
+
+    n_queries = sum(len(v) for v in run.config.DISCOVERY_QUERIES.values())
+    assert len(calls) == n_queries
+    assert all(platform == "twitter" and community is None for platform, _, _, community, _ in calls)
+
+
+def test_main_processes_due_retry_also_returned_by_discovery(monkeypatch):
+    monkeypatch.setattr(run.config, "PLATFORMS", ["twitter"])
+    monkeypatch.setattr(run.config, "DISCOVERY_QUERIES", {"family": ["query"]})
+    monkeypatch.setattr(run.opencli_adapter, "fetch_leads", lambda *args: [lead("retry")])
+    monkeypatch.setattr(run, "is_qualified_candidate", lambda candidate: True)
+    monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {"retry": "provider_error"})
+    monkeypatch.setattr(
+        run.database,
+        "get_due_for_retry",
+        lambda limit: [{**lead("retry"), "classifier_status": "provider_error"}],
+    )
+    received = []
+    monkeypatch.setattr(
+        run,
+        "classify_and_store",
+        lambda leads, **kwargs: received.extend(leads) or 0,
+    )
+    _set_dry_run_argv(monkeypatch)
+
+    run.main()
+
+    assert [candidate["post_id"] for candidate in received] == ["retry"]

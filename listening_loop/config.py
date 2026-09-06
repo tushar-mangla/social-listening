@@ -58,75 +58,272 @@ RETRY_MAX_DELAY_SECONDS = 3600
 # Confidence threshold for ICP qualification.
 CONFIDENCE_THRESHOLD = 0.60
 
-# List of platforms supported by opencli that we want to search
+# List of platforms supported by opencli that we want to search.
+# Only reddit is enabled until other platforms are validated end-to-end.
 PLATFORMS = [
-    "twitter",
-    "facebook",
-    "reddit"
+    "reddit",
 ]
 
-# Targeted subreddits for recruitment/staffing agency owners & hiring managers
+# Rate limit protection: polite delay between successive discovery searches.
+DISCOVERY_QUERY_DELAY_SECONDS = 1.5
+
+# RecruitmentOS sells to recruitment/staffing agency operators.
+# Do NOT mix employer hiring-intent communities into this pipeline.
+# r/SaaS, r/startups → TREND_SUBREDDITS only (employer/developer audience, not agency owners).
 LEAD_SUBREDDITS = [
     "recruiting",
-    "staffingagency",
-    "agencyowners",
-    "smallbusiness",
-    "Entrepreneur"
+    "staffing",
+    "Recruitment",
+    "freelanceRecruiters",   # highest-signal: independent recruiters discussing BD & client pain
 ]
+
+DISCOVERY_QUERIES = {
+    # ---------------------------------------------------------
+    # 1. CLIENT ACQUISITION / BUSINESS DEVELOPMENT
+    # Natural agency-owner language — NOT formal query phrases.
+    # ---------------------------------------------------------
+    "agency_business_development": [
+        "getting clients",
+        "find new clients",
+        "finding clients",
+        "win new clients",
+        "winning clients",
+        "client acquisition",
+        "new business",
+        "business development",
+        "lead generation",
+        "generate leads",
+        "sales pipeline",
+        "BD strategy",
+        "BD calls",
+    ],
+
+    # ---------------------------------------------------------
+    # 2. PIPELINE / REFERRAL PAIN
+    # ---------------------------------------------------------
+    "agency_pipeline_pain": [
+        "need more clients",
+        "struggling to get clients",
+        "struggling with BD",
+        "pipeline is dry",
+        "dry pipeline",
+        "referrals drying up",
+        "referrals have dried up",
+        "not enough clients",
+        "not enough vacancies",
+        "job flow",
+        "more job flow",
+        "new vacancies",
+        "new roles",
+    ],
+
+    # ---------------------------------------------------------
+    # 3. OUTBOUND / COLD EMAIL / LINKEDIN
+    # ---------------------------------------------------------
+    "agency_outbound": [
+        "cold email",
+        "cold emailing",
+        "cold calling",
+        "linkedin outreach",
+        "outbound",
+        "outbound sales",
+        "email outreach",
+        "reply rate",
+        "response rate",
+        "booking meetings",
+        "book more meetings",
+        "prospecting",
+    ],
+
+    # ---------------------------------------------------------
+    # 4. RECRUITMENT BUSINESS OPERATIONS
+    # ---------------------------------------------------------
+    "agency_operations": [
+        "recruitment automation",
+        "recruiting automation",
+        "staffing automation",
+        "recruitment workflow",
+        "recruiting workflow",
+        "ATS automation",
+        "CRM automation",
+        "recruitment CRM",
+        "staffing CRM",
+        "recruitment ATS",
+    ],
+
+    # ---------------------------------------------------------
+    # 5. CANDIDATE DATABASE / MONETISATION
+    # ---------------------------------------------------------
+    "candidate_database": [
+        "candidate database",
+        "candidate database sitting",
+        "old candidates",
+        "database candidates",
+        "database marketing",
+        "candidate rediscovery",
+        "candidate matching",
+        "candidate to client",
+        "candidate marketing",
+        "market candidates",
+        "reverse marketing",
+    ],
+
+    # ---------------------------------------------------------
+    # 6. RECRUITMENT-AGENCY SPECIFIC LANGUAGE
+    # ---------------------------------------------------------
+    "agency_language": [
+        "recruitment agency",
+        "recruitment business",
+        "recruiting agency",
+        "staffing agency",
+        "staffing firm",
+        "recruitment firm",
+        "executive search firm",
+        "recruitment founder",
+        "staffing founder",
+        "agency owner",
+        "recruitment owner",
+        "recruitment director",
+        "staffing owner",
+        "360 recruiter",
+        "recruitment consultant",
+    ],
+}
 
 TREND_SUBREDDITS = [
     "webdev",
-    "SaaS",
-    "automation"
+    "SaaS",       # employer/developer/product audience — trend content only
+    "startups",   # employer audience — trend content only
+    "automation",
 ]
 
-# Search keywords targeting recruitment agency BD & hiring pain points
+# Search keywords — maximize recall; the LLM handles final ICP precision.
 KEYWORDS = [
-    "need a recruiter",
-    "need recruiting help",
-    "recommend a recruiting agency",
-    "struggling to hire",
-    "can't find candidates",
-    "candidate ghosting",
-    "hiring is hard",
-    "looking for talent",
-    "recruiting software",
-    "applicant tracking system",
-    "recruitment agency BD",
-    "staffing agency client acquisition",
-    "recruiter cold email",
-    "ATS candidate matching"
+    # BD
+    "business development",
+    "new business",
+    "client acquisition",
+    "getting clients",
+    "finding clients",
+    "win clients",
+    "new clients",
+    "lead generation",
+    # Pipeline pain
+    "pipeline",
+    "referrals",
+    "job flow",
+    "vacancies",
+    "struggling with BD",
+    "need more clients",
+    # Outreach
+    "cold email",
+    "cold calling",
+    "linkedin outreach",
+    "outbound",
+    "prospecting",
+    "reply rate",
+    # Recruitment operations
+    "recruitment agency",
+    "recruitment business",
+    "staffing agency",
+    "staffing firm",
+    "recruitment firm",
+    "recruitment automation",
+    # Database / C2C
+    "candidate database",
+    "candidate matching",
+    "candidate marketing",
+    "reverse marketing",
+    "ATS",
+    "CRM",
 ]
 
+# Stage-1 pre-filter: indicates EITHER agency identity OR relevant commercial pain.
+# Do not use this as the final ICP decision — the LLM does that.
 QUALIFYING_KEYWORDS = (
-    "need a recruiter",
-    "need recruiting help",
-    "recommend a recruiting agency",
-    "struggling to hire",
-    "can't find candidates",
-    "candidate ghosting",
-    "hiring is hard",
-    "looking for talent",
-    "recruiting software",
-    "applicant tracking system",
-    "recruitment agency BD",
-    "staffing agency",
+    # Agency identity
     "recruitment agency",
+    "recruiting agency",
+    "staffing agency",
+    "recruitment business",
+    "recruitment firm",
+    "staffing firm",
+    "executive search",
+    "headhunting",
+    "agency owner",
+    "recruitment founder",
+    "staffing founder",
+    "recruitment director",
+    "staffing owner",
+    "360 recruiter",
     "recruiter",
+    # BD / commercial problems
+    "business development",
+    "new business",
+    "client acquisition",
+    "getting clients",
+    "finding clients",
+    "win clients",
+    "winning clients",
+    "need more clients",
+    "lead generation",
+    "sales pipeline",
+    "pipeline is dry",
+    "dry pipeline",
+    "referrals",
+    "job flow",
+    # Outbound
+    "cold email",
+    "cold emailing",
+    "cold calling",
+    "linkedin outreach",
+    "outbound",
+    "prospecting",
+    "reply rate",
+    "response rate",
+    "booking meetings",
+    # Recruitment operations
+    "candidate database",
+    "candidate matching",
+    "candidate marketing",
+    "reverse marketing",
+    "recruitment automation",
+    "staffing automation",
+    "ATS automation",
+    "CRM automation",
 )
 
 EXCLUDED_KEYWORDS = (
+    # Job seekers
     "looking for a job",
     "open to work",
     "my resume",
+    "my cv",
     "job application",
+    "job applications",
     "seeking employment",
     "hire me",
     "i am looking for work",
+    "looking for work",
     "entry level resume",
-    "internal recruiter",
-    "hr generalist",
     "resume advice",
+    "cv advice",
+    # Candidate-focused discussions
+    "interview advice",
+    "interview tips",
+    "salary negotiation",
+    "career advice",
+    # Internal HR / talent teams
+    "internal recruiter",
+    "in-house recruiter",
+    "in house recruiter",
+    "internal talent acquisition",
+    "talent acquisition specialist",
+    "hr generalist",
+    # Recruiter job hunting
+    "looking for recruiter role",
+    "looking for recruitment role",
+    "recruiter looking for work",
 )
 
 

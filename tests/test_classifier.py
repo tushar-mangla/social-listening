@@ -24,8 +24,11 @@ def classification(post_id="post-1", **overrides):
         "intent": "buying",
         "urgency": "now",
         "one_line": "Agency owner wants ATS matching support.",
-        "confidence": 0.8,
+        "icp_score": overrides.get("confidence", 0.8),
+        "intent_score": overrides.get("confidence", 0.8),
     }
+    if "confidence" in overrides:
+        del overrides["confidence"]
     result.update(overrides)
     return result
 
@@ -61,24 +64,36 @@ def test_all_qualifying_roles_qualify_with_allowed_icp_intent():
 
 
 def test_strict_unknown_role_rejection():
+    # An unknown role with low icp_score is rejected.
     out = classifier.validate_classification(
-        classification(author_role="unknown", icp="recruitment_agency", intent="buying", confidence=0.95),
+        classification(author_role="unknown", icp="recruitment_agency", intent="buying", confidence=0.59),
         {"post-1"},
     )
     assert out["classifier_status"] == "not_qualified"
 
+def test_unknown_role_qualifies_with_high_icp_score():
+    # The new Phase 2B logic allows unknown author roles if icp_score is high.
+    out = classifier.validate_classification(
+        classification(author_role="unknown", icp="recruitment_agency", intent="buying", confidence=0.8),
+        {"post-1"},
+    )
+    assert out["classifier_status"] == "qualified"
+
 
 def test_job_seekers_direct_employers_and_advice_threads_are_not_qualified():
     for output in (
-        classification(icp="not_icp", author_role="job_seeker"),
-        classification(icp="not_icp", author_role="employer", intent="buying"),
-        classification(icp="not_icp", author_role="internal_recruiter", intent="advice"),
-        classification(icp="recruitment_agency", author_role="developer", intent="buying", confidence=0.9),
-        classification(icp="recruitment_agency", author_role="freelancer", intent="pain", confidence=0.9),
-        classification(icp="recruitment_agency", author_role="owner", intent="advice", confidence=0.9),
-        classification(icp="recruitment_agency", author_role="owner", intent="job_search", confidence=0.9),
-        classification(icp="recruitment_agency", author_role="owner", intent="buying", confidence=0.59),
-        classification(icp="not_icp", author_role="owner", intent="buying", confidence=0.9),
+        classification(icp="not_icp", author_role="job_seeker", confidence=0.1),
+        classification(icp="not_icp", author_role="employer", intent="buying", confidence=0.2),
+        classification(icp="not_icp", author_role="internal_recruiter", intent="advice", confidence=0.3),
+        # low intent score despite high icp
+        classification(icp="recruitment_agency", author_role="developer", intent="buying", icp_score=0.9, intent_score=0.2),
+        classification(icp="recruitment_agency", author_role="freelancer", intent="pain", icp_score=0.2, intent_score=0.9),
+        # low intent score for advice
+        classification(icp="recruitment_agency", author_role="owner", intent="advice", icp_score=0.9, intent_score=0.3),
+        classification(icp="recruitment_agency", author_role="owner", intent="job_search", icp_score=0.9, intent_score=0.1),
+        # below icp threshold
+        classification(icp="recruitment_agency", author_role="owner", intent="buying", icp_score=0.59, intent_score=0.9),
+        classification(icp="not_icp", author_role="owner", intent="buying", icp_score=0.4, intent_score=0.9),
     ):
         assert classifier.validate_classification(output, {"post-1"})["classifier_status"] == "not_qualified"
 
@@ -132,7 +147,7 @@ def test_provider_payload_uses_codex_model_default_and_bounded_content(monkeypat
             pass
 
         def json(self):
-            return {"choices": [{"message": {"content": '[{"id":"post-1","icp":"recruitment_agency","author_role":"owner","intent":"pain","urgency":"soon","one_line":"Agency sourcing pain.","confidence":0.7}]'}}]}
+            return {"choices": [{"message": {"content": '[{"id":"post-1","icp":"recruitment_agency","author_role":"owner","intent":"pain","urgency":"soon","one_line":"Agency sourcing pain.","icp_score":0.7,"intent_score":0.7}]'}}]}
 
     def fake_post(url, **kwargs):
         captured["url"] = url

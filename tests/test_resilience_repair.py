@@ -149,7 +149,11 @@ def test_qualified_evidence_monotonic_on_reaffirmation(monkeypatch, tmp_path):
 def _valid_item(pid, **overrides):
     item = {"id": pid, "icp": "recruitment_agency", "author_role": "owner",
             "intent": "buying", "urgency": "now",
-            "one_line": "Agency owner needs ATS help.", "confidence": 0.8}
+            "one_line": "Agency owner needs ATS help.", 
+            "icp_score": overrides.get("confidence", 0.8),
+            "intent_score": overrides.get("confidence", 0.8)}
+    if "confidence" in overrides:
+        del overrides["confidence"]
     item.update(overrides)
     return item
 

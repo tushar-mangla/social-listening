@@ -1,7 +1,19 @@
 import subprocess
 import json
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Union
+from typing import List, Optional, Union
+
+
+class OpenCLIExecutionError(RuntimeError):
+    """Raised when an OpenCLI work item cannot be executed."""
+
+
+class UnsupportedSubredditScopeError(OpenCLIExecutionError):
+    """Raised when the installed OpenCLI cannot scope Reddit searches."""
+
+
+_SUBREDDIT_SCOPE_SUPPORTED: Optional[bool] = None
 
 
 def _safe_error(value: object) -> str:
@@ -13,7 +25,42 @@ def _safe_error(value: object) -> str:
     except Exception:
         return str(value).replace("\n", " ").replace("\r", " ")[:300]
 
-def run_opencli(platform: str, query: str) -> list[dict]:
+def verify_subreddit_scoping_supported() -> None:
+    """Verify and cache that the installed OpenCLI documents ``--subreddit``."""
+    global _SUBREDDIT_SCOPE_SUPPORTED
+    if _SUBREDDIT_SCOPE_SUPPORTED is True:
+        return
+
+    command = ["opencli", "reddit", "search", "--help"]
+    try:
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            encoding="utf-8",
+            timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise UnsupportedSubredditScopeError(
+            "OpenCLI Reddit subreddit scope could not be verified."
+        ) from exc
+    except Exception as exc:
+        raise UnsupportedSubredditScopeError(
+            f"OpenCLI Reddit subreddit scope verification failed: {_safe_error(exc)}"
+        ) from exc
+
+    help_text = process.stdout or ""
+    subreddit_option_pattern = r"(?m)^\s*--subreddit(?:\s|=|$)"
+    if process.returncode != 0 or not re.search(subreddit_option_pattern, help_text):
+        _SUBREDDIT_SCOPE_SUPPORTED = False
+        raise UnsupportedSubredditScopeError(
+            "Installed OpenCLI does not document --subreddit for Reddit search."
+        )
+    _SUBREDDIT_SCOPE_SUPPORTED = True
+
+
+def run_opencli(platform: str, query: str, community: Optional[str] = None) -> list[dict]:
     """
     Runs the opencli command with the specified platform and query,
     and returns the parsed JSON output.
@@ -21,6 +68,9 @@ def run_opencli(platform: str, query: str) -> list[dict]:
     command = ["opencli", platform, "search", query]
     if platform == "reddit":
         command.extend(["--sort", "new"])
+        if community:
+            verify_subreddit_scoping_supported()
+            command.extend(["--subreddit", community])
     command.extend(["--format", "json"])
     try:
         process = subprocess.run(
@@ -32,9 +82,13 @@ def run_opencli(platform: str, query: str) -> list[dict]:
             timeout=60,
         )
         if process.returncode != 0:
-            # Never emit raw stderr: it can contain post bodies or raw JSON.
-            print(f"[OpenCLI warning] {platform} process failed with returncode {process.returncode}")
-            return []
+            combined = (process.stdout or "") + (process.stderr or "")
+            detail = ""
+            if "429" in combined or "Failed to fetch" in combined:
+                detail = " (rate limited / HTTP 429)"
+            raise OpenCLIExecutionError(
+                f"{platform} process failed with returncode {process.returncode}{detail}"
+            )
         
         output = process.stdout.strip()
         if not output:
@@ -57,18 +111,18 @@ def run_opencli(platform: str, query: str) -> list[dict]:
                     print("Warning: Could not decode JSON line; skipping malformed line.")
             return results
 
-    except FileNotFoundError:
-        print("Error: 'opencli' command not found. Make sure it is installed and in your PATH.")
-        return []
+    except FileNotFoundError as exc:
+        raise OpenCLIExecutionError(
+            "'opencli' command not found. Make sure it is installed and in your PATH."
+        ) from exc
     except subprocess.CalledProcessError as e:
-        print(f"Error executing opencli: {_safe_error(e)}")
-        return []
-    except subprocess.TimeoutExpired:
-        print("Error: opencli timed out after 60 seconds.")
-        return []
+        raise OpenCLIExecutionError(f"Error executing opencli: {_safe_error(e)}") from e
+    except subprocess.TimeoutExpired as exc:
+        raise OpenCLIExecutionError("opencli timed out after 60 seconds.") from exc
     except Exception as e:
-        print(f"An unexpected error occurred: {_safe_error(e)}")
-        return []
+        if isinstance(e, OpenCLIExecutionError):
+            raise
+        raise OpenCLIExecutionError(f"Unexpected OpenCLI error: {_safe_error(e)}") from e
 
 def parse_timestamp(timestamp_val: Union[str, int, float, None]) -> Union[datetime, None]:
     """Parses a timestamp (ISO string, Twitter RFC 2822, epoch int/float) into a timezone-aware UTC datetime."""
@@ -118,12 +172,32 @@ def parse_timestamp(timestamp_val: Union[str, int, float, None]) -> Union[dateti
     print("Warning: Could not parse timestamp; skipping unsupported timestamp format.")
     return None
 
-def fetch_leads(platform: str, keywords: list[str], lookback_hours: int = 5) -> list[dict]:
+def fetch_leads(
+    platform: str,
+    query: Union[str, List[str]],
+    lookback_hours: int = 5,
+    community: Optional[str] = None,
+    query_family: Optional[str] = None,
+) -> list[dict]:
     """
     Fetches leads from a given platform using opencli, filtering by keywords and time.
     """
-    query = " OR ".join(f'"{k}"' for k in keywords)
-    raw_posts = run_opencli(platform, query)
+    # Accept the old single-item list shape for callers outside the scheduler,
+    # but never turn multiple terms into an aggregate query.
+    if isinstance(query, list):
+        if not query:
+            raise ValueError("Query list cannot be empty")
+        if len(query) > 1:
+            raise ValueError(
+                "fetch_leads accepts a single query string; "
+                "multiple queries must be executed as discrete query calls"
+            )
+        exact_query = query[0]
+    else:
+        exact_query = query
+    if not isinstance(exact_query, str) or not exact_query.strip():
+        return []
+    raw_posts = run_opencli(platform, exact_query, community)
     
     leads = []
     time_limit = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
@@ -161,6 +235,11 @@ def fetch_leads(platform: str, keywords: list[str], lookback_hours: int = 5) -> 
             "url": post.get("url"),
             "posted_at": posted_at,
             "author": author,
+            "platform": platform,
+            "community": community,
+            "query_family": query_family,
+            "exact_query": exact_query,
+            "retrieved_at": datetime.now(timezone.utc),
         })
             
     return leads

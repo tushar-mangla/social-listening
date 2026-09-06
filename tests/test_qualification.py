@@ -14,8 +14,11 @@ def _valid_item(**overrides):
         "intent": "buying",
         "urgency": "now",
         "one_line": "Agency owner needs ATS help.",
-        "confidence": 0.8,
+        "icp_score": overrides.get("confidence", 0.8),
+        "intent_score": overrides.get("confidence", 0.8),
     }
+    if "confidence" in overrides:
+        del overrides["confidence"]
     item.update(overrides)
     return item
 
@@ -23,9 +26,10 @@ def _valid_item(**overrides):
 def test_confidence_boundary_and_intent_matrix():
     assert qualification.validate_classification(_valid_item(confidence=0.60), {"p1"})["classifier_status"] == "qualified"
     assert qualification.validate_classification(_valid_item(confidence=0.59), {"p1"})["classifier_status"] == "not_qualified"
-    for intent, expected in (("buying", "qualified"), ("pain", "qualified"), ("advice", "not_qualified"), ("job_search", "not_qualified"), ("other", "not_qualified")):
-        out = qualification.validate_classification(_valid_item(intent=intent), {"p1"})
-        assert out["classifier_status"] == expected, intent
+    
+    # Low intent score gets rejected regardless of intent string
+    out = qualification.validate_classification(_valid_item(icp_score=0.9, intent_score=0.4), {"p1"})
+    assert out["classifier_status"] == "not_qualified"
 
 
 def test_strict_response_validation_rejects_bad_shapes():

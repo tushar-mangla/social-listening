@@ -200,13 +200,14 @@ def _prompt_posts(posts: list[dict]) -> str:
 
 
 SYSTEM_PROMPT = """Classify each social post as RecruitmentOS lead evidence. Return only a JSON array.
-Each item must be {"id","icp","author_role","intent","urgency","one_line","confidence"}.
+Each item must be {"id","icp","author_role","intent","urgency","one_line","icp_score","intent_score"}.
 icp: recruitment_agency, independent_recruiter, or not_icp.
 author_role: owner, founder, principal, headhunter, independent_recruiter, job_seeker, internal_recruiter, hr_generalist, developer, employer, freelancer, unknown, or other.
 intent: buying, pain, advice, job_search, or other. urgency: now, soon, later, or unknown.
 An ICP is ONLY a recruitment/staffing agency founder, owner, principal, headhunter, or independent recruiter discussing BD/client acquisition, candidate sourcing, ATS/matching, or recruitment automation.
 EXCLUDE all of: job seekers, resume advice, internal HR/talent acquisition hiring directly, developers, generic agencies without recruitment-agency evidence, freelancers, employers, and unrelated users.
-author_role unknown is NOT qualified and must be classified as not_qualified (never qualified). confidence is 0..1; only >= 0.60 with buying/pain intent can qualify."""
+icp_score (0..1): How confident are you the author is an owner/founder/director/operator of a recruitment/staffing/search business?
+intent_score (0..1): How confident are you the post indicates a problem RecruitmentOS can solve?"""
 
 
 def validate_classification(raw: Any, expected_ids: set[str]) -> dict:
@@ -227,9 +228,15 @@ def validate_classification(raw: Any, expected_ids: set[str]) -> dict:
         if raw.get(field) not in allowed:
             return _failure(post_id, "unclassified", "invalid_response", "invalid " + field)
 
-    confidence = raw.get("confidence")
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
-        return _failure(post_id, "unclassified", "invalid_response", "invalid confidence")
+    icp_score = raw.get("icp_score")
+    if isinstance(icp_score, bool) or not isinstance(icp_score, (int, float)) or not 0 <= icp_score <= 1:
+        return _failure(post_id, "unclassified", "invalid_response", "invalid icp_score")
+
+    intent_score = raw.get("intent_score")
+    if isinstance(intent_score, bool) or not isinstance(intent_score, (int, float)) or not 0 <= intent_score <= 1:
+        return _failure(post_id, "unclassified", "invalid_response", "invalid intent_score")
+        
+    confidence = (icp_score + intent_score) / 2
     one_line = raw.get("one_line")
     if not isinstance(one_line, str) or not one_line.strip():
         return _failure(post_id, "unclassified", "invalid_response", "missing one_line")
@@ -242,18 +249,30 @@ def validate_classification(raw: Any, expected_ids: set[str]) -> dict:
         "urgency": raw["urgency"],
         "one_line": one_line.strip()[:1000],
         "summary": one_line.strip()[:1000],
+        "icp_score": float(icp_score),
+        "intent_score": float(intent_score),
         "confidence": float(confidence),
         "classifier_error_category": None,
         "classifier_error_message": None,
     }
-    result["classifier_status"] = (
-        "qualified"
-        if raw["author_role"] in QUALIFYING_ROLES
-        and raw["icp"] in QUALIFYING_ICPS
-        and raw["intent"] in QUALIFYING_INTENTS
-        and float(confidence) >= CONFIDENCE_THRESHOLD
-        else "not_qualified"
+    
+    is_qualified = (
+        float(icp_score) >= CONFIDENCE_THRESHOLD
+        and float(intent_score) >= 0.50
     )
+    
+    result["classifier_status"] = "qualified" if is_qualified else "not_qualified"
+    
+    if not is_qualified:
+        reasons = []
+        if float(icp_score) < CONFIDENCE_THRESHOLD:
+            reasons.append(f"icp_score ({icp_score}) < {CONFIDENCE_THRESHOLD}")
+        if float(intent_score) < 0.50:
+            reasons.append(f"intent_score ({intent_score}) < 0.50")
+        result["rejection_reason"] = " and ".join(reasons)
+    else:
+        result["rejection_reason"] = None
+        
     return result
 
 

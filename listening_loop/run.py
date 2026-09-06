@@ -1,4 +1,7 @@
 import argparse
+import json
+import os
+import time
 from datetime import datetime
 
 from listening_loop import config
@@ -51,7 +54,7 @@ def _retry_post_from_row(row: dict) -> dict:
     }
 
 
-def classify_and_store(leads: list[dict]) -> int:
+def classify_and_store(leads: list[dict], outcome_callback=None) -> int:
     """Stage 2 + persistence: classify survivors, degrade gracefully, store first.
 
     - Caps the per-run classification batch.
@@ -84,6 +87,8 @@ def classify_and_store(leads: list[dict]) -> int:
         if qualification.should_use_keyword_fallback():
             for post in batch:
                 outcome = qualification.build_keyword_fallback(post)
+                if outcome_callback:
+                    outcome_callback(outcome)
                 fallback_total += 1
                 classified_total += 1
                 if database.add_lead(outcome):
@@ -91,6 +96,8 @@ def classify_and_store(leads: list[dict]) -> int:
             continue
         outcomes = qualification.classify_posts(batch)
         for outcome in outcomes:
+            if outcome_callback:
+                outcome_callback(outcome)
             classified_total += 1
             if outcome.get("classifier_status") == "provider_error":
                 # classify_posts already bumped the consecutive counter per batch;
@@ -158,69 +165,150 @@ def main():
 
     new_leads_count = 0
     seen_post_ids: set[str] = set()
-    for platform in platforms_to_search:
-        print(f"\nFetching leads from {platform}...")
+    query_report: list[dict] = []
+    discovery_leads: list[dict] = []
+    run_metrics = {
+        "raw_discovered": 0,
+        "after_dedup": 0,
+        "stage1_passed": 0,
+        "sent_to_llm": 0,
+        "llm_qualified": 0,
+        "llm_rejected": 0,
+        "added_to_db": 0,
+        "database_errors": 0,
+        "classification_skipped_database_status": 0,
+    }
+
+    def add_error(record: dict, exc: object) -> None:
+        record["errors"] += 1
+        print(f"Discovery query failed: {_safe_error(exc)}")
+
+    # Keep each query/community invocation observable and independently
+    # recoverable. First-seen provenance wins when posts overlap.
+    consecutive_discovery_errors = 0
+    max_consecutive_discovery_errors = 4
+    discovery_halted = False
+
+    for query_family, queries in config.DISCOVERY_QUERIES.items():
+        if discovery_halted:
+            break
+        for exact_query in queries:
+            if discovery_halted:
+                break
+            for platform in platforms_to_search:
+                if discovery_halted:
+                    break
+                communities = config.LEAD_SUBREDDITS if platform == "reddit" else [None]
+                for community in communities:
+                    if discovery_halted:
+                        break
+                    record = {
+                        "platform": platform,
+                        "community": community,
+                        "query_family": query_family,
+                        "exact_query": exact_query,
+                        "posts_retrieved": 0,
+                        "duplicates_removed": 0,
+                        "stage_one_passed": 0,
+                        "luna_qualified": 0,
+                        "luna_rejected": 0,
+                        "errors": 0,
+                    }
+                    query_report.append(record)
+                    try:
+                        fetched = opencli_adapter.fetch_leads(
+                            platform, exact_query, args.hours, community, query_family
+                        )
+                        consecutive_discovery_errors = 0
+                        record["posts_retrieved"] = len(fetched)
+                        run_metrics["raw_discovered"] += len(fetched)
+                        for lead in fetched:
+                            pid = str(lead.get("post_id") or "")
+                            if not pid or pid in seen_post_ids:
+                                if pid:
+                                    record["duplicates_removed"] += 1
+                                continue
+                            seen_post_ids.add(pid)
+                            run_metrics["after_dedup"] += 1
+                            if is_qualified_candidate(lead):
+                                record["stage_one_passed"] += 1
+                                run_metrics["stage1_passed"] += 1
+                                discovery_leads.append(lead)
+                    except Exception as exc:
+                        add_error(record, exc)
+                        consecutive_discovery_errors += 1
+                        if consecutive_discovery_errors >= max_consecutive_discovery_errors:
+                            print(
+                                f"\n[discovery warning] {consecutive_discovery_errors} consecutive queries failed. "
+                                "Platform is likely rate-limiting (HTTP 429) or session unavailable. "
+                                "Halting discovery early to avoid worsening rate limits.\n"
+                            )
+                            discovery_halted = True
+                            break
+                    delay = getattr(config, "DISCOVERY_QUERY_DELAY_SECONDS", 1.5)
+                    if delay > 0 and "PYTEST_CURRENT_TEST" not in os.environ:
+                        time.sleep(delay)
+
+    try:
+        stored = database.get_existing_status_map([str(l.get("post_id")) for l in discovery_leads])
+    except Exception:
+        # Status verification protects terminal rows from being reclassified.
+        # Do not expose database exception details in run logs.
+        print("Database status lookup unavailable; skipping unverified discovered posts.")
+        run_metrics["database_errors"] += 1
+        run_metrics["classification_skipped_database_status"] += len(discovery_leads)
+        fresh_leads = []
+    else:
+        fresh_leads = [l for l in discovery_leads if str(l.get("post_id")) not in stored]
+    if len(fresh_leads) != len(discovery_leads):
+        print(f"Skipping {len(discovery_leads) - len(fresh_leads)} already-stored post(s) with prior status.")
+
+    retry_posts: list[dict] = []
+    try:
+        remaining_cap = max(0, config.CLASSIFICATION_BATCH_CAP - len(fresh_leads))
+        if remaining_cap > 0:
+            # A discovered post can be an existing retryable row. Its presence
+            # in discovery must not suppress the due retry row.
+            retry_post_ids: set[str] = set()
+            for row in database.get_due_for_retry(limit=remaining_cap):
+                pid = str(row.get("post_id"))
+                if not pid or pid in retry_post_ids:
+                    continue
+                retry_post_ids.add(pid)
+                retry_posts.append(_retry_post_from_row(row))
+    except Exception as exc:
+        print(f"Retry selection unavailable, continuing with fresh candidates: {_safe_error(exc)}")
+
+    leads = _dedupe_posts((fresh_leads + retry_posts)[:config.CLASSIFICATION_BATCH_CAP])
+
+    def record_outcome(outcome: dict) -> None:
+        status = outcome.get("classifier_status")
+        if status == "qualified":
+            run_metrics["llm_qualified"] += 1
+        elif status == "not_qualified":
+            run_metrics["llm_rejected"] += 1
+            
+        provenance = (outcome.get("platform"), outcome.get("community"),
+                      outcome.get("query_family"), outcome.get("exact_query"))
+        for record in query_report:
+            if (record["platform"], record["community"], record["query_family"], record["exact_query"]) == provenance:
+                if status == "qualified":
+                    record["luna_qualified"] += 1
+                elif status == "not_qualified":
+                    record["luna_rejected"] += 1
+                return
+
+    if leads:
+        run_metrics["sent_to_llm"] += len(leads)
+        print(f"Found {len(leads)} keyword candidates. Classifying and storing outcomes...")
         try:
-            leads = opencli_adapter.fetch_leads(platform, config.KEYWORDS, args.hours)
+            new_leads_count += classify_and_store(leads, outcome_callback=record_outcome)
+            run_metrics["added_to_db"] += new_leads_count
         except Exception as exc:
-            print(f"Error fetching from {platform}: {_safe_error(exc)}. Continuing with remaining platforms.")
-            continue
-        leads = [lead for lead in leads if is_qualified_candidate(lead)]
+            print(f"Error classifying candidates: {_safe_error(exc)}. Continuing to reporting.")
 
-        # Deduplicate within this platform and across the whole run so the
-        # same post is never sent to the paid LLM provider twice.
-        deduped_fresh: list[dict] = []
-        for lead in leads:
-            pid = str(lead.get("post_id") or "")
-            if not pid or pid in seen_post_ids or pid in {str(l.get("post_id")) for l in deduped_fresh}:
-                continue
-            deduped_fresh.append(lead)
-
-        # Skip posts already stored in SQLite: only fresh posts (not yet in
-        # SQLite) and due retries may reach classify_and_store. In
-        # particular, terminal statuses (qualified / not_qualified) are never
-        # re-classified here.
-        try:
-            stored = database.get_existing_status_map([str(l.get("post_id")) for l in deduped_fresh])
-        except Exception:
-            stored = {}
-        fresh_leads = [l for l in deduped_fresh if str(l.get("post_id")) not in stored]
-        skipped_stored = len(deduped_fresh) - len(fresh_leads)
-        if skipped_stored:
-            print(f"Skipping {skipped_stored} already-stored post(s) with prior status.")
-
-        # Include due error/unclassified retries within the same batch cap.
-        retry_posts: list[dict] = []
-        try:
-            remaining_cap = max(0, config.CLASSIFICATION_BATCH_CAP - len(fresh_leads))
-            if remaining_cap > 0:
-                due_rows = database.get_due_for_retry(limit=remaining_cap)
-                seen_ids = {str(l.get("post_id")) for l in fresh_leads} | seen_post_ids
-                for row in due_rows:
-                    pid = str(row.get("post_id"))
-                    if pid in seen_ids:
-                        continue
-                    seen_ids.add(pid)
-                    retry_posts.append(_retry_post_from_row(row))
-                if retry_posts:
-                    print(f"Including {len(retry_posts)} due retry candidate(s) within batch cap.")
-        except Exception as exc:
-            print(f"Retry selection unavailable, continuing with fresh candidates: {_safe_error(exc)}")
-
-        leads = _dedupe_posts((fresh_leads + retry_posts)[:config.CLASSIFICATION_BATCH_CAP])
-        for lead in leads:
-            seen_post_ids.add(str(lead.get("post_id")))
-
-        if not leads:
-            print(f"No new leads found on {platform} in the last {args.hours} hours.")
-            continue
-
-        print(f"Found {len(leads)} keyword candidates on {platform}. Classifying and storing outcomes...")
-        try:
-            new_leads_count += classify_and_store(leads)
-        except Exception as exc:
-            print(f"Error classifying candidates from {platform}: {_safe_error(exc)}. Continuing with remaining platforms.")
-            continue
+    print("Query performance report: " + json.dumps(query_report, default=str, sort_keys=True))
+    print("Run metrics: " + json.dumps(run_metrics, sort_keys=True))
 
     print(f"\nAdded a total of {new_leads_count} new leads to the database.")
 
