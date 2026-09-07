@@ -10,6 +10,22 @@ from listening_loop import qualification
 from listening_loop import database
 from listening_loop import opencli_adapter
 from listening_loop import notion_sync
+from listening_loop.logger import logger
+import sys
+
+class LoggerWriter:
+    def __init__(self, level):
+        self.level = level
+
+    def write(self, message):
+        if message != '\n':
+            self.level(message)
+
+    def flush(self):
+        pass
+
+sys.stdout = LoggerWriter(logger.info)
+sys.stderr = LoggerWriter(logger.error)
 
 
 def is_qualified_candidate(lead: dict) -> bool:
