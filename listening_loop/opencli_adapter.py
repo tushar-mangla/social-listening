@@ -9,6 +9,10 @@ class OpenCLIExecutionError(RuntimeError):
     """Raised when an OpenCLI work item cannot be executed."""
 
 
+class OpenCLIRateLimitError(OpenCLIExecutionError):
+    """Raised when OpenCLI reports an HTTP 429 response."""
+
+
 class UnsupportedSubredditScopeError(OpenCLIExecutionError):
     """Raised when the installed OpenCLI cannot scope Reddit searches."""
 
@@ -83,9 +87,13 @@ def run_opencli(platform: str, query: str, community: Optional[str] = None) -> l
         )
         if process.returncode != 0:
             combined = (process.stdout or "") + (process.stderr or "")
+            if re.search(r"(?i)(?:\bhttp\s*)?\b429\b|\btoo many requests\b", combined):
+                raise OpenCLIRateLimitError(
+                    f"{platform} process failed with returncode {process.returncode} (HTTP 429)"
+                )
             detail = ""
-            if "429" in combined or "Failed to fetch" in combined:
-                detail = " (rate limited / HTTP 429)"
+            if "Failed to fetch" in combined:
+                detail = " (fetch failed)"
             raise OpenCLIExecutionError(
                 f"{platform} process failed with returncode {process.returncode}{detail}"
             )

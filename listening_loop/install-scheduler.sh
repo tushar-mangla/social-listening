@@ -24,6 +24,8 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
   echo "Detected macOS. Installing launchd plists to ~/Library/LaunchAgents..."
   mkdir -p "$HOME/Library/LaunchAgents"
 
+  mkdir -p "$PROJECT_ROOT/logs"
+
   # Digest plist (every 3h = 10800s)
   DIGEST_PLIST="$HOME/Library/LaunchAgents/com.social-listening.digest.plist"
   cat <<EOF > "$DIGEST_PLIST"
@@ -37,9 +39,9 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     <string>$HERE/run.sh</string>
   </array>
   <key>StartInterval</key><integer>10800</integer>
-  <key>RunAtLoad</key><false/>
-  <key>StandardOutPath</key><string>$HERE/data/launchd.log</string>
-  <key>StandardErrorPath</key><string>$HERE/data/launchd.log</string>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$PROJECT_ROOT/logs/launchd.log</string>
+  <key>StandardErrorPath</key><string>$PROJECT_ROOT/logs/launchd.log</string>
 </dict>
 </plist>
 EOF
@@ -47,7 +49,7 @@ EOF
   launchctl unload "$DIGEST_PLIST" 2>/dev/null || true
   launchctl load "$DIGEST_PLIST"
   echo "✅ OpenCLI lead scheduler loaded successfully!"
-  echo "Check logs with: tail -f $HERE/data/launchd.log"
+  echo "Check logs with: tail -f $PROJECT_ROOT/logs/launchd.log"
 
 else
   echo "Detected Linux / Unix. Add the following to your crontab (crontab -e):"

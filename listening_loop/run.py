@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import random
 import time
 from datetime import datetime
 
@@ -57,6 +58,22 @@ def _dedupe_posts(posts: list[dict]) -> list[dict]:
         seen.add(pid)
         unique.append(post)
     return unique
+
+
+def _sleep_for(seconds: float) -> None:
+    """Sleep in production; tests can patch this helper without waiting."""
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        time.sleep(seconds)
+
+
+def _pace_between_attempts() -> None:
+    _sleep_for(random.uniform(config.INTER_QUERY_SLEEP_MIN, config.INTER_QUERY_SLEEP_MAX))
+
+
+def _rate_limit_cooldown() -> float:
+    cooldown = random.uniform(config.RATE_LIMIT_BACKOFF_MIN, config.RATE_LIMIT_BACKOFF_MAX)
+    _sleep_for(cooldown)
+    return cooldown
 
 
 def _retry_post_from_row(row: dict) -> dict:
@@ -203,20 +220,20 @@ def main():
     # recoverable. First-seen provenance wins when posts overlap.
     consecutive_discovery_errors = 0
     max_consecutive_discovery_errors = 4
-    discovery_halted = False
+    halted_platforms: set[str] = set()
 
-    for query_family, queries in config.DISCOVERY_QUERIES.items():
-        if discovery_halted:
-            break
-        for exact_query in queries:
-            if discovery_halted:
+    for platform in platforms_to_search:
+        if platform in halted_platforms:
+            continue
+        for query_family, queries in config.DISCOVERY_QUERIES.items():
+            if platform in halted_platforms:
                 break
-            for platform in platforms_to_search:
-                if discovery_halted:
+            for exact_query in queries:
+                if platform in halted_platforms:
                     break
-                communities = config.LEAD_SUBREDDITS if platform == "reddit" else [None]
+                communities = config.REDDIT_COMMUNITIES if platform == "reddit" else [None]
                 for community in communities:
-                    if discovery_halted:
+                    if platform in halted_platforms:
                         break
                     record = {
                         "platform": platform,
@@ -231,11 +248,51 @@ def main():
                         "errors": 0,
                     }
                     query_report.append(record)
+                    attempts = 0
+                    while True:
+                        attempts += 1
+                        try:
+                            fetched = opencli_adapter.fetch_leads(
+                                platform, exact_query, args.hours, community, query_family
+                            )
+                            _pace_between_attempts()
+                            consecutive_discovery_errors = 0
+                            break
+                        except opencli_adapter.OpenCLIRateLimitError:
+                            _pace_between_attempts()
+                            if attempts <= config.MAX_RATE_LIMIT_RETRIES:
+                                cooldown = _rate_limit_cooldown()
+                                logger.warning(
+                                    f"Rate limited on {platform}. Waiting {cooldown:.1f}s cooldown before retry..."
+                                )
+                                print(
+                                    f"[rate limit] platform={platform} family={query_family} "
+                                    f"community={community or 'global'} retrying after cooldown"
+                                )
+                                continue
+                            add_error(record, opencli_adapter.OpenCLIRateLimitError("HTTP 429"))
+                            halted_platforms.add(platform)
+                            print(
+                                f"[rate limit] platform={platform} family={query_family} "
+                                "retry exhausted; halting this platform"
+                            )
+                            fetched = None
+                            break
+                        except Exception as exc:
+                            _pace_between_attempts()
+                            add_error(record, exc)
+                            consecutive_discovery_errors += 1
+                            fetched = None
+                            break
+                    if fetched is None:
+                        if consecutive_discovery_errors >= max_consecutive_discovery_errors:
+                            print(
+                                f"\n[discovery warning] {consecutive_discovery_errors} consecutive queries failed. "
+                                "Halting discovery early to avoid worsening rate limits.\n"
+                            )
+                            halted_platforms.update(platforms_to_search)
+                        continue
                     try:
-                        fetched = opencli_adapter.fetch_leads(
-                            platform, exact_query, args.hours, community, query_family
-                        )
-                        consecutive_discovery_errors = 0
                         record["posts_retrieved"] = len(fetched)
                         run_metrics["raw_discovered"] += len(fetched)
                         for lead in fetched:
@@ -252,18 +309,6 @@ def main():
                                 discovery_leads.append(lead)
                     except Exception as exc:
                         add_error(record, exc)
-                        consecutive_discovery_errors += 1
-                        if consecutive_discovery_errors >= max_consecutive_discovery_errors:
-                            print(
-                                f"\n[discovery warning] {consecutive_discovery_errors} consecutive queries failed. "
-                                "Platform is likely rate-limiting (HTTP 429) or session unavailable. "
-                                "Halting discovery early to avoid worsening rate limits.\n"
-                            )
-                            discovery_halted = True
-                            break
-                    delay = getattr(config, "DISCOVERY_QUERY_DELAY_SECONDS", 1.5)
-                    if delay > 0 and "PYTEST_CURRENT_TEST" not in os.environ:
-                        time.sleep(delay)
 
     try:
         stored = database.get_existing_status_map([str(l.get("post_id")) for l in discovery_leads])

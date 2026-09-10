@@ -29,6 +29,14 @@ def test_run_opencli_handles_nonzero_exit_and_timeout(monkeypatch):
     else:
         assert False, "expected OpenCLIExecutionError"
 
+    monkeypatch.setattr(
+        opencli_adapter.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "", "HTTP 429 Too Many Requests"),
+    )
+    with pytest.raises(opencli_adapter.OpenCLIRateLimitError):
+        opencli_adapter.run_opencli("reddit", "staffing")
+
     def timed_out(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], 60)
 
@@ -39,6 +47,52 @@ def test_run_opencli_handles_nonzero_exit_and_timeout(monkeypatch):
         pass
     else:
         assert False, "expected OpenCLIExecutionError"
+
+
+@pytest.mark.parametrize(
+    "stdout,stderr",
+    [
+        ("", "HTTP 429"),
+        ("", "http 429"),
+        ("429", ""),
+        ("", "429"),
+        ("", "too many requests"),
+        ("", "Too Many Requests"),
+        ("", "Error: 429 Too Many Requests"),
+        ("", "status 429: rate limited"),
+        ("error: HTTP 429", ""),
+    ],
+)
+def test_run_opencli_rate_limit_positive_cases(monkeypatch, stdout, stderr):
+    monkeypatch.setattr(
+        opencli_adapter.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, stdout, stderr),
+    )
+    with pytest.raises(opencli_adapter.OpenCLIRateLimitError):
+        opencli_adapter.run_opencli("reddit", "staffing")
+
+
+@pytest.mark.parametrize(
+    "stdout,stderr",
+    [
+        ("", "Error code 1429"),
+        ("", "post_id_429abc failed"),
+        ("processing post 4290", ""),
+        ("", "4299 items remaining"),
+        ("", "post_id 1429 not found"),
+        ("item429", ""),
+    ],
+)
+def test_run_opencli_rate_limit_negative_cases(monkeypatch, stdout, stderr):
+    monkeypatch.setattr(
+        opencli_adapter.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, stdout, stderr),
+    )
+    with pytest.raises(opencli_adapter.OpenCLIExecutionError) as exc_info:
+        opencli_adapter.run_opencli("reddit", "staffing")
+    assert not isinstance(exc_info.value, opencli_adapter.OpenCLIRateLimitError)
 
 
 def test_run_opencli_uses_bounded_subprocess_settings(monkeypatch):
@@ -160,3 +214,50 @@ def test_fetch_leads_skips_non_dicts_and_uses_safe_defaults(monkeypatch):
 def test_fetch_leads_rejects_multiple_queries_in_a_list():
     with pytest.raises(ValueError, match="single query string"):
         opencli_adapter.fetch_leads("reddit", ["first query", "second query"])
+
+
+def test_run_opencli_passes_unquoted_conversational_queries_directly(monkeypatch):
+    captured = []
+    opencli_adapter._SUBREDDIT_SCOPE_SUPPORTED = None
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        output = "--subreddit [value]" if cmd[-1] == "--help" else "[]"
+        return subprocess.CompletedProcess(cmd, 0, output, "")
+
+    monkeypatch.setattr(opencli_adapter.subprocess, "run", fake_run)
+
+    conversational_query = "recruitment agency getting clients"
+
+    # Test Reddit invocation
+    opencli_adapter.run_opencli("reddit", conversational_query, community="recruiting")
+    assert captured[1] == [
+        "opencli",
+        "reddit",
+        "search",
+        conversational_query,
+        "--sort",
+        "new",
+        "--subreddit",
+        "recruiting",
+        "--format",
+        "json",
+    ]
+    assert '"' not in captured[1][3]
+    assert "'" not in captured[1][3]
+    assert " OR " not in captured[1][3]
+
+    # Test Twitter invocation
+    opencli_adapter.run_opencli("twitter", conversational_query, community=None)
+    assert captured[2] == [
+        "opencli",
+        "twitter",
+        "search",
+        conversational_query,
+        "--format",
+        "json",
+    ]
+    assert "--subreddit" not in captured[2]
+    assert '"' not in captured[2][3]
+    assert "'" not in captured[2][3]
+    assert " OR " not in captured[2][3]

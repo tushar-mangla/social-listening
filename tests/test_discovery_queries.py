@@ -8,91 +8,25 @@ ORIGINAL_EXCLUDED_KEYWORDS = config.EXCLUDED_KEYWORDS
 
 
 EXPECTED = {
-    "agency_business_development": [
-        "getting clients",
-        "find new clients",
-        "finding clients",
-        "win new clients",
-        "winning clients",
-        "client acquisition",
-        "new business",
-        "business development",
-        "lead generation",
-        "generate leads",
-        "sales pipeline",
-        "BD strategy",
-        "BD calls",
+    "agency_client_acquisition": [
+        "recruitment agency getting clients",
+        "staffing agency client acquisition",
+        "recruitment business new business",
     ],
     "agency_pipeline_pain": [
-        "need more clients",
-        "struggling to get clients",
-        "struggling with BD",
-        "pipeline is dry",
-        "dry pipeline",
-        "referrals drying up",
-        "referrals have dried up",
-        "not enough clients",
-        "not enough vacancies",
-        "job flow",
-        "more job flow",
-        "new vacancies",
-        "new roles",
+        "recruitment agency need more clients",
+        "staffing agency pipeline is dry",
+        "recruitment business job flow",
     ],
     "agency_outbound": [
-        "cold email",
-        "cold emailing",
-        "cold calling",
-        "linkedin outreach",
-        "outbound",
-        "outbound sales",
-        "email outreach",
-        "reply rate",
-        "response rate",
-        "booking meetings",
-        "book more meetings",
-        "prospecting",
+        "recruitment agency cold email",
+        "staffing agency linkedin outreach",
+        "recruitment business outbound sales",
     ],
     "agency_operations": [
-        "recruitment automation",
-        "recruiting automation",
-        "staffing automation",
-        "recruitment workflow",
-        "recruiting workflow",
-        "ATS automation",
-        "CRM automation",
-        "recruitment CRM",
-        "staffing CRM",
-        "recruitment ATS",
-    ],
-    "candidate_database": [
-        "candidate database",
-        "candidate database sitting",
-        "old candidates",
-        "database candidates",
-        "database marketing",
-        "candidate rediscovery",
-        "candidate matching",
-        "candidate to client",
-        "candidate marketing",
-        "market candidates",
-        "reverse marketing",
-    ],
-    "agency_language": [
-        "recruitment agency",
-        "recruitment business",
-        "recruiting agency",
-        "staffing agency",
-        "staffing firm",
-        "recruitment firm",
-        "executive search firm",
-        "recruitment founder",
-        "staffing founder",
-        "agency owner",
-        "recruitment owner",
-        "recruitment director",
-        "staffing owner",
-        "360 recruiter",
-        "recruitment consultant",
+        "recruitment agency candidate database",
+        "staffing agency ATS automation",
+        "recruitment agency CRM automation",
     ],
 }
 
@@ -102,10 +36,35 @@ EXPECTED_SUBREDDITS = [
 
 
 def test_discovery_configuration_is_exact_and_ordered():
+    assert config.PLATFORMS == ["reddit", "twitter"]
+    assert (config.INTER_QUERY_SLEEP_MIN, config.INTER_QUERY_SLEEP_MAX) == (3.0, 7.0)
+    assert (config.RATE_LIMIT_BACKOFF_MIN, config.RATE_LIMIT_BACKOFF_MAX) == (60.0, 90.0)
+    assert config.MAX_RATE_LIMIT_RETRIES == 1
     assert config.LEAD_SUBREDDITS == EXPECTED_SUBREDDITS
+    assert config.REDDIT_COMMUNITIES == EXPECTED_SUBREDDITS
     assert config.DISCOVERY_QUERIES == EXPECTED
     assert config.QUALIFYING_KEYWORDS == ORIGINAL_QUALIFYING_KEYWORDS
     assert config.EXCLUDED_KEYWORDS == ORIGINAL_EXCLUDED_KEYWORDS
+
+
+def test_discovery_queries_syntax_integrity():
+    assert list(config.DISCOVERY_QUERIES.keys()) == [
+        "agency_client_acquisition",
+        "agency_pipeline_pain",
+        "agency_outbound",
+        "agency_operations",
+    ]
+    all_queries = [
+        q for family_queries in config.DISCOVERY_QUERIES.values() for q in family_queries
+    ]
+    assert len(all_queries) == 12
+    for q in all_queries:
+        assert isinstance(q, str) and len(q.strip()) > 0
+        assert '"' not in q, f"Query contains double quotes: {q}"
+        assert "'" not in q, f"Query contains single quotes: {q}"
+        assert " OR " not in q, f"Query contains OR operator: {q}"
+        assert " AND " not in q, f"Query contains AND operator: {q}"
+        assert not (q.startswith('"') and q.endswith('"')), f"Query is wrapped in quotes: {q}"
 
 
 def test_adapter_executes_one_exact_scoped_query_and_attaches_provenance(monkeypatch):
@@ -117,12 +76,13 @@ def test_adapter_executes_one_exact_scoped_query_and_attaches_provenance(monkeyp
         return [{"id": "p1", "title": "Agency", "selftext": "ATS", "created_utc": now}]
 
     monkeypatch.setattr(opencli_adapter, "run_opencli", fake_run)
-    lead = opencli_adapter.fetch_leads("reddit", EXPECTED["agency_language"][0], 24, "Recruitment", "agency_language")[0]
-    assert captured == {"platform": "reddit", "query": EXPECTED["agency_language"][0], "community": "Recruitment"}
+    query = EXPECTED["agency_client_acquisition"][0]
+    lead = opencli_adapter.fetch_leads("reddit", query, 24, "Recruitment", "agency_client_acquisition")[0]
+    assert captured == {"platform": "reddit", "query": query, "community": "Recruitment"}
     assert lead["platform"] == "reddit"
     assert lead["community"] == "Recruitment"
-    assert lead["query_family"] == "agency_language"
-    assert lead["exact_query"] == EXPECTED["agency_language"][0]
+    assert lead["query_family"] == "agency_client_acquisition"
+    assert lead["exact_query"] == query
     assert lead["retrieved_at"].tzinfo == timezone.utc
 
 
@@ -136,8 +96,19 @@ def test_run_opencli_uses_documented_reddit_scope(monkeypatch):
         return __import__("subprocess").CompletedProcess(cmd, 0, output, "")
 
     monkeypatch.setattr(opencli_adapter.subprocess, "run", fake_run)
-    opencli_adapter.run_opencli("reddit", '"agency" "clients"', "staffing")
-    assert captured[1] == ["opencli", "reddit", "search", '"agency" "clients"', "--sort", "new", "--subreddit", "staffing", "--format", "json"]
+    opencli_adapter.run_opencli("reddit", "recruitment agency getting clients", "staffing")
+    assert captured[1] == [
+        "opencli",
+        "reddit",
+        "search",
+        "recruitment agency getting clients",
+        "--sort",
+        "new",
+        "--subreddit",
+        "staffing",
+        "--format",
+        "json",
+    ]
 
 
 def test_subreddit_scope_verification_requires_documented_option_syntax(monkeypatch):
@@ -159,7 +130,7 @@ def test_subreddit_scope_verification_requires_documented_option_syntax(monkeypa
 
 
 def test_run_report_is_structured_and_counts_failed_query(monkeypatch, capsys):
-    monkeypatch.setattr(run.config, "DISCOVERY_QUERY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
     monkeypatch.setattr(run.config, "PLATFORMS", ["reddit"])
     monkeypatch.setattr(run.config, "DISCOVERY_QUERIES", {"family": ["q1"]})
     monkeypatch.setattr(run.config, "LEAD_SUBREDDITS", ["staffing"])
@@ -189,8 +160,8 @@ def test_run_report_is_structured_and_counts_failed_query(monkeypatch, capsys):
 
 
 def test_reddit_default_queries_expand_to_correct_discrete_work_items(monkeypatch, capsys):
-    # 18 queries × 7 subreddits = 126 Reddit work items
-    monkeypatch.setattr(run.config, "DISCOVERY_QUERY_DELAY_SECONDS", 0)
+    # 12 queries × 4 subreddits = 48 Reddit work items
+    monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
     monkeypatch.setattr(run.config, "PLATFORMS", ["reddit"])
     calls = []
 
@@ -229,8 +200,53 @@ def test_reddit_default_queries_expand_to_correct_discrete_work_items(monkeypatc
     assert all(item["errors"] == 0 for item in report)
 
 
+def test_all_platforms_schedule_48_reddit_and_12_twitter_items(monkeypatch):
+    calls = []
+    monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
+    monkeypatch.setattr(run.opencli_adapter, "fetch_leads", lambda *args: calls.append(args) or [])
+    monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {})
+    monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
+    monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: [])
+    import sys
+    monkeypatch.setattr(sys, "argv", ["run", "--dry-run"])
+    run.main()
+    assert len(calls) == 60
+    assert sum(call[0] == "reddit" for call in calls) == 48
+    assert sum(call[0] == "twitter" for call in calls) == 12
+    assert [call[0] for call in calls] == ["reddit"] * 48 + ["twitter"] * 12
+    assert all(call[3] in config.REDDIT_COMMUNITIES for call in calls[:48])
+    assert all(call[3] is None for call in calls[48:])
+
+
+def test_exact_60_item_sequence_order_all_platforms(monkeypatch):
+    calls = []
+    monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
+    monkeypatch.setattr(run.opencli_adapter, "fetch_leads", lambda *args: calls.append(args) or [])
+    monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {})
+    monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
+    monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: [])
+    import sys
+    monkeypatch.setattr(sys, "argv", ["run", "--dry-run"])
+    run.main()
+
+    # Exact 60-item sequence order: first 48 are reddit, next 12 are twitter
+    assert len(calls) == 60
+    assert [call[0] for call in calls] == ["reddit"] * 48 + ["twitter"] * 12
+    assert all(call[3] in config.REDDIT_COMMUNITIES for call in calls[:48])
+    assert all(call[3] is None for call in calls[48:])
+
+    # Assert all 60 calls receive unquoted strings with no boolean operators or rigid quotes
+    approved_queries = {q for queries in EXPECTED.values() for q in queries}
+    for platform, query, hours, community, family in calls:
+        assert query in approved_queries
+        assert '"' not in query
+        assert "'" not in query
+        assert " OR " not in query
+        assert " AND " not in query
+
+
 def test_run_dedupes_across_query_work_items_and_reports(monkeypatch, capsys):
-    monkeypatch.setattr(run.config, "DISCOVERY_QUERY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
     monkeypatch.setattr(run.config, "PLATFORMS", ["reddit"])
     monkeypatch.setattr(run.config, "DISCOVERY_QUERIES", {"family": ["q1", "q2"]})
     calls = []

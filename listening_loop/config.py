@@ -26,7 +26,7 @@ def ensure_dotenv_loaded() -> None:
     """Load .env once per process at runtime (idempotent, never logs secrets)."""
     global _DOTENV_LOADED
     if not _DOTENV_LOADED:
-        load_dotenv()
+        load_dotenv(override=True)
         _DOTENV_LOADED = True
 
 
@@ -58,14 +58,22 @@ RETRY_MAX_DELAY_SECONDS = 3600
 # Confidence threshold for ICP qualification.
 CONFIDENCE_THRESHOLD = 0.60
 
-# List of platforms supported by opencli that we want to search.
-# Only reddit is enabled until other platforms are validated end-to-end.
-PLATFORMS = [
-    "reddit",
-]
+# Platforms searched in order for each configured query.
+PLATFORMS = ["reddit", "twitter"]
 
-# Rate limit protection: polite delay between successive discovery searches.
-DISCOVERY_QUERY_DELAY_SECONDS = 1.5
+# Randomized pacing and bounded rate-limit recovery for discovery searches.
+INTER_QUERY_SLEEP_MIN = 3.0
+INTER_QUERY_SLEEP_MAX = 7.0
+RATE_LIMIT_BACKOFF_MIN = 60.0
+RATE_LIMIT_BACKOFF_MAX = 90.0
+MAX_RATE_LIMIT_RETRIES = 1
+
+# Descriptive aliases retained for callers that use the plan's long names.
+DISCOVERY_QUERY_JITTER_MIN_SECONDS = INTER_QUERY_SLEEP_MIN
+DISCOVERY_QUERY_JITTER_MAX_SECONDS = INTER_QUERY_SLEEP_MAX
+DISCOVERY_RATE_LIMIT_COOLDOWN_MIN_SECONDS = RATE_LIMIT_BACKOFF_MIN
+DISCOVERY_RATE_LIMIT_COOLDOWN_MAX_SECONDS = RATE_LIMIT_BACKOFF_MAX
+DISCOVERY_RATE_LIMIT_MAX_RETRIES = MAX_RATE_LIMIT_RETRIES
 
 # RecruitmentOS sells to recruitment/staffing agency operators.
 # Do NOT mix employer hiring-intent communities into this pipeline.
@@ -78,115 +86,25 @@ LEAD_SUBREDDITS = [
 ]
 
 DISCOVERY_QUERIES = {
-    # ---------------------------------------------------------
-    # 1. CLIENT ACQUISITION / BUSINESS DEVELOPMENT
-    # Natural agency-owner language — NOT formal query phrases.
-    # ---------------------------------------------------------
-    "agency_business_development": [
-        "getting clients",
-        "find new clients",
-        "finding clients",
-        "win new clients",
-        "winning clients",
-        "client acquisition",
-        "new business",
-        "business development",
-        "lead generation",
-        "generate leads",
-        "sales pipeline",
-        "BD strategy",
-        "BD calls",
+    "agency_client_acquisition": [
+        "recruitment agency getting clients",
+        "staffing agency client acquisition",
+        "recruitment business new business",
     ],
-
-    # ---------------------------------------------------------
-    # 2. PIPELINE / REFERRAL PAIN
-    # ---------------------------------------------------------
     "agency_pipeline_pain": [
-        "need more clients",
-        "struggling to get clients",
-        "struggling with BD",
-        "pipeline is dry",
-        "dry pipeline",
-        "referrals drying up",
-        "referrals have dried up",
-        "not enough clients",
-        "not enough vacancies",
-        "job flow",
-        "more job flow",
-        "new vacancies",
-        "new roles",
+        "recruitment agency need more clients",
+        "staffing agency pipeline is dry",
+        "recruitment business job flow",
     ],
-
-    # ---------------------------------------------------------
-    # 3. OUTBOUND / COLD EMAIL / LINKEDIN
-    # ---------------------------------------------------------
     "agency_outbound": [
-        "cold email",
-        "cold emailing",
-        "cold calling",
-        "linkedin outreach",
-        "outbound",
-        "outbound sales",
-        "email outreach",
-        "reply rate",
-        "response rate",
-        "booking meetings",
-        "book more meetings",
-        "prospecting",
+        "recruitment agency cold email",
+        "staffing agency linkedin outreach",
+        "recruitment business outbound sales",
     ],
-
-    # ---------------------------------------------------------
-    # 4. RECRUITMENT BUSINESS OPERATIONS
-    # ---------------------------------------------------------
     "agency_operations": [
-        "recruitment automation",
-        "recruiting automation",
-        "staffing automation",
-        "recruitment workflow",
-        "recruiting workflow",
-        "ATS automation",
-        "CRM automation",
-        "recruitment CRM",
-        "staffing CRM",
-        "recruitment ATS",
-    ],
-
-    # ---------------------------------------------------------
-    # 5. CANDIDATE DATABASE / MONETISATION
-    # ---------------------------------------------------------
-    "candidate_database": [
-        "candidate database",
-        "candidate database sitting",
-        "old candidates",
-        "database candidates",
-        "database marketing",
-        "candidate rediscovery",
-        "candidate matching",
-        "candidate to client",
-        "candidate marketing",
-        "market candidates",
-        "reverse marketing",
-    ],
-
-    # ---------------------------------------------------------
-    # 6. RECRUITMENT-AGENCY SPECIFIC LANGUAGE
-    # ---------------------------------------------------------
-    "agency_language": [
-        "recruitment agency",
-        "recruitment business",
-        "recruiting agency",
-        "staffing agency",
-        "staffing firm",
-        "recruitment firm",
-        "executive search firm",
-        "recruitment founder",
-        "staffing founder",
-        "agency owner",
-        "recruitment owner",
-        "recruitment director",
-        "staffing owner",
-        "360 recruiter",
-        "recruitment consultant",
+        "recruitment agency candidate database",
+        "staffing agency ATS automation",
+        "recruitment agency CRM automation",
     ],
 }
 
@@ -382,3 +300,14 @@ def get_provider_config_summary() -> dict:
         "retry_base_delay_seconds": RETRY_BASE_DELAY_SECONDS,
         "retry_max_delay_seconds": RETRY_MAX_DELAY_SECONDS,
     }
+
+
+def __getattr__(name: str):
+    if name == "REDDIT_COMMUNITIES":
+        return LEAD_SUBREDDITS
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + ["REDDIT_COMMUNITIES"])
+

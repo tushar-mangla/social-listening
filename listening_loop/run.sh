@@ -3,6 +3,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$HERE/.." && pwd)"
 PYTHON_EXE="$PROJECT_ROOT/venv/bin/python"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 if [[ ! -x "$PYTHON_EXE" ]]; then
 	echo "[run] missing virtual-environment Python: $PYTHON_EXE" >&2

@@ -1,3 +1,5 @@
+import json
+
 from listening_loop import config
 from listening_loop import run
 from listening_loop import qualification
@@ -190,6 +192,108 @@ def test_main_runs_all_queries_unscoped_for_non_reddit_platform(monkeypatch):
     n_queries = sum(len(v) for v in run.config.DISCOVERY_QUERIES.values())
     assert len(calls) == n_queries
     assert all(platform == "twitter" and community is None for platform, _, _, community, _ in calls)
+
+
+def test_rate_limit_cooldown_returns_sampled_float(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(run, "_sleep_for", sleeps.append)
+    cooldown = run._rate_limit_cooldown()
+    assert isinstance(cooldown, float)
+    assert config.RATE_LIMIT_BACKOFF_MIN <= cooldown <= config.RATE_LIMIT_BACKOFF_MAX
+    assert sleeps == [cooldown]
+
+
+def test_rate_limit_retries_once_then_halts_only_that_platform(monkeypatch, caplog):
+    calls = []
+    sleeps = []
+    attempts = {"reddit": 0}
+
+    def fetch(platform, query, hours, community, family):
+        calls.append((platform, query, community))
+        if platform == "reddit":
+            attempts[platform] += 1
+            raise run.opencli_adapter.OpenCLIRateLimitError("HTTP 429")
+        return []
+
+    monkeypatch.setattr(run.config, "DISCOVERY_QUERIES", {"family": ["query"]})
+    monkeypatch.setattr(run.config, "PLATFORMS", ["reddit", "twitter"])
+    monkeypatch.setattr(run.config, "LEAD_SUBREDDITS", ["staffing"])
+    monkeypatch.setattr(run.opencli_adapter, "fetch_leads", fetch)
+    monkeypatch.setattr(run, "_sleep_for", sleeps.append)
+    monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {})
+    monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
+    monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: [])
+    _set_dry_run_argv(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        run.main()
+
+    assert attempts["reddit"] == 2
+    assert [platform for platform, _, _ in calls] == ["reddit", "reddit", "twitter"]
+    assert len(sleeps) == 4
+    # Deterministic sequence: pace -> cooldown -> pace -> pace
+    assert 3 <= sleeps[0] <= 7
+    assert 60 <= sleeps[1] <= 90
+    assert 3 <= sleeps[2] <= 7
+    assert 3 <= sleeps[3] <= 7
+    assert any(f"Rate limited on reddit. Waiting {sleeps[1]:.1f}s cooldown before retry..." in r.message for r in caplog.records)
+
+
+def test_rate_limit_successful_retry_leaves_query_report_successful(monkeypatch, caplog, capsys):
+    calls = []
+    sleeps = []
+    attempts = 0
+
+    def fetch(platform, query, hours, community, family):
+        nonlocal attempts
+        attempts += 1
+        calls.append((platform, query, community))
+        if attempts == 1:
+            raise run.opencli_adapter.OpenCLIRateLimitError("HTTP 429")
+        return [lead("recovered")]
+
+    monkeypatch.setattr(run.config, "DISCOVERY_QUERIES", {"family": ["query"]})
+    monkeypatch.setattr(run.config, "PLATFORMS", ["reddit"])
+    monkeypatch.setattr(run.config, "LEAD_SUBREDDITS", ["staffing"])
+    monkeypatch.setattr(run.opencli_adapter, "fetch_leads", fetch)
+    monkeypatch.setattr(run, "_sleep_for", sleeps.append)
+    monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {})
+    monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
+    monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: [])
+    monkeypatch.setattr(run, "is_qualified_candidate", lambda candidate: True)
+    monkeypatch.setattr(run, "classify_and_store", lambda leads, **kwargs: len(leads))
+    _set_dry_run_argv(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        run.main()
+
+    assert attempts == 2
+    assert len(calls) == 2
+    assert calls[0] == ("reddit", "query", "staffing")
+    assert calls[1] == ("reddit", "query", "staffing")
+
+    # Deterministic sequence:
+    # 1. pace between attempts (3-7s)
+    # 2. cooldown (60-90s)
+    # 3. pace between attempts after successful retry (3-7s)
+    assert len(sleeps) == 3
+    assert 3.0 <= sleeps[0] <= 7.0
+    assert 60.0 <= sleeps[1] <= 90.0
+    assert 3.0 <= sleeps[2] <= 7.0
+
+    # Warning log includes exact cooldown seconds
+    expected_msg = f"Rate limited on reddit. Waiting {sleeps[1]:.1f}s cooldown before retry..."
+    assert any(expected_msg in record.message for record in caplog.records)
+
+    # Query report shows success (errors == 0, posts_retrieved == 1)
+    out = capsys.readouterr().out
+    report_line = next(line for line in out.splitlines() if line.startswith("Query performance report: "))
+    report = json.loads(report_line.split(": ", 1)[1])
+    assert len(report) == 1
+    assert report[0]["platform"] == "reddit"
+    assert report[0]["community"] == "staffing"
+    assert report[0]["errors"] == 0
+    assert report[0]["posts_retrieved"] == 1
 
 
 def test_main_processes_due_retry_also_returned_by_discovery(monkeypatch):
