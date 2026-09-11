@@ -30,11 +30,9 @@ sys.stderr = LoggerWriter(logger.error)
 
 
 def is_qualified_candidate(lead: dict) -> bool:
-    """Stage 1: fast keyword pre-filter. Rejected posts never invoke the LLM."""
-    content = (lead.get("content") or "").lower()
-    if not content or any(term in content for term in config.EXCLUDED_KEYWORDS):
-        return False
-    return any(term in content for term in config.QUALIFYING_KEYWORDS)
+    """Pass all discovered posts without keyword filtering (all posts forwarded to LLM & Notion)."""
+    content = (lead.get("content") or "").strip()
+    return bool(content)
 
 
 def _safe_error(exc: object) -> str:
@@ -70,8 +68,11 @@ def _pace_between_attempts() -> None:
     _sleep_for(random.uniform(config.INTER_QUERY_SLEEP_MIN, config.INTER_QUERY_SLEEP_MAX))
 
 
-def _rate_limit_cooldown() -> float:
-    cooldown = random.uniform(config.RATE_LIMIT_BACKOFF_MIN, config.RATE_LIMIT_BACKOFF_MAX)
+def _rate_limit_cooldown(attempt: int, retry_after: int = None) -> float:
+    cap = min(config.RATE_LIMIT_BACKOFF_MAX, config.RATE_LIMIT_BACKOFF_MIN * 2 ** (attempt - 1))
+    cooldown = random.uniform(min(config.RATE_LIMIT_BACKOFF_MIN, cap), cap)
+    if retry_after is not None:
+        cooldown = max(float(retry_after), cooldown)
     _sleep_for(cooldown)
     return cooldown
 
@@ -210,6 +211,7 @@ def main():
         "added_to_db": 0,
         "database_errors": 0,
         "classification_skipped_database_status": 0,
+        "rejection_reasons": {},
     }
 
     def add_error(record: dict, exc: object) -> None:
@@ -225,7 +227,58 @@ def main():
     for platform in platforms_to_search:
         if platform in halted_platforms:
             continue
-        for query_family, queries in config.DISCOVERY_QUERIES.items():
+
+        # ── Facebook: fetch news feed once (actual post content) ──────────────────
+        if platform == "facebook":
+            feed_record = {
+                "platform": "facebook",
+                "community": None,
+                "query_family": "feed",
+                "exact_query": "feed",
+                "posts_retrieved": 0,
+                "duplicates_removed": 0,
+                "stage_one_passed": 0,
+                "luna_qualified": 0,
+                "luna_rejected": 0,
+                "errors": 0,
+            }
+            query_report.append(feed_record)
+            fb_limit = getattr(config, "FACEBOOK_FEED_LIMIT", 25)
+            try:
+                fetched = opencli_adapter.fetch_facebook_feed(
+                    lookback_hours=args.hours, limit=fb_limit
+                )
+                feed_record["posts_retrieved"] = len(fetched)
+                run_metrics["raw_discovered"] += len(fetched)
+                for lead in fetched:
+                    pid = str(lead.get("post_id") or "")
+                    if not pid or pid in seen_post_ids:
+                        if pid:
+                            feed_record["duplicates_removed"] += 1
+                        continue
+                    seen_post_ids.add(pid)
+                    run_metrics["after_dedup"] += 1
+                    if is_qualified_candidate(lead):
+                        feed_record["stage_one_passed"] += 1
+                        run_metrics["stage1_passed"] += 1
+                        discovery_leads.append(lead)
+            except opencli_adapter.OpenCLIAuthenticationError:
+                print(
+                    "\n[auth error] Facebook requires authentication. "
+                    "Please run 'opencli facebook login'.\n"
+                    "Halting facebook only and continuing other platforms."
+                )
+                halted_platforms.add("facebook")
+                feed_record["errors"] += 1
+            except (opencli_adapter.OpenCLIFetchError, opencli_adapter.OpenCLIExecutionError) as exc:
+                print(f"[facebook feed error] {_safe_error(exc)}")
+                feed_record["errors"] += 1
+            _pace_between_attempts()
+            continue
+        # ─────────────────────────────────────────────────────────────────────────
+
+        queries_dict = config.DISCOVERY_QUERIES
+        for query_family, queries in queries_dict.items():
             if platform in halted_platforms:
                 break
             for exact_query in queries:
@@ -258,10 +311,11 @@ def main():
                             _pace_between_attempts()
                             consecutive_discovery_errors = 0
                             break
-                        except opencli_adapter.OpenCLIRateLimitError:
+                        except opencli_adapter.OpenCLIRateLimitError as exc:
                             _pace_between_attempts()
                             if attempts <= config.MAX_RATE_LIMIT_RETRIES:
-                                cooldown = _rate_limit_cooldown()
+                                retry_after = opencli_adapter._parse_retry_after(str(exc))
+                                cooldown = _rate_limit_cooldown(attempts, retry_after)
                                 logger.warning(
                                     f"Rate limited on {platform}. Waiting {cooldown:.1f}s cooldown before retry..."
                                 )
@@ -270,12 +324,39 @@ def main():
                                     f"community={community or 'global'} retrying after cooldown"
                                 )
                                 continue
-                            add_error(record, opencli_adapter.OpenCLIRateLimitError("HTTP 429"))
+                            add_error(record, exc)
                             halted_platforms.add(platform)
                             print(
                                 f"[rate limit] platform={platform} family={query_family} "
                                 "retry exhausted; halting this platform"
                             )
+                            fetched = None
+                            break
+                        except opencli_adapter.OpenCLIAuthenticationError as exc:
+                            # Actionable guidance
+                            print(
+                                f"\n[auth error] Platform {platform} requires authentication. "
+                                f"Please run 'opencli {platform} login' or ensure session cookies (e.g. c_user) are present.\n"
+                                f"Halting {platform} only and continuing other platforms."
+                            )
+                            halted_platforms.add(platform)
+                            fetched = None
+                            break
+                        except opencli_adapter.OpenCLIFetchError as exc:
+                            _pace_between_attempts()
+                            if attempts <= getattr(config, "MAX_FETCH_RETRIES", 1):
+                                cooldown = random.uniform(
+                                    getattr(config, "FETCH_RETRY_BACKOFF_MIN", 15.0),
+                                    getattr(config, "FETCH_RETRY_BACKOFF_MAX", 30.0)
+                                )
+                                _sleep_for(cooldown)
+                                print(
+                                    f"[fetch error] platform={platform} family={query_family} "
+                                    f"community={community or 'global'} retrying after {cooldown:.1f}s..."
+                                )
+                                continue
+                            add_error(record, exc)
+                            consecutive_discovery_errors += 1
                             fetched = None
                             break
                         except Exception as exc:
@@ -348,6 +429,9 @@ def main():
             run_metrics["llm_qualified"] += 1
         elif status == "not_qualified":
             run_metrics["llm_rejected"] += 1
+            reason = outcome.get("rejection_reason")
+            if reason:
+                run_metrics["rejection_reasons"][reason] = run_metrics["rejection_reasons"].get(reason, 0) + 1
             
         provenance = (outcome.get("platform"), outcome.get("community"),
                       outcome.get("query_family"), outcome.get("exact_query"))

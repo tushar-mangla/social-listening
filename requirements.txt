@@ -4,3 +4,4 @@ requests
 pytest
 pytest-mock
 opencli
+playwright

@@ -151,19 +151,23 @@ def _runtime_base_url() -> str:
 
 
 def _runtime_model() -> str:
+    # Prefer config.get_provider_model() when env or default is set
+    cfg_model = config.get_provider_model()
+    if cfg_model and cfg_model != config.CODEX_EVERYWHERE_MODEL_DEFAULT:
+        return cfg_model
     override = globals().get("LLM_MODEL") or ""
-    if isinstance(override, str) and override.strip():
+    if isinstance(override, str) and override.strip() and override.strip() != config.CODEX_EVERYWHERE_MODEL_DEFAULT:
         return override.strip()
     try:
         import sys as _sys
 
         _classifier = _sys.modules.get("listening_loop.classifier")
         _c_override = getattr(_classifier, "LLM_MODEL", "") if _classifier else ""
-        if isinstance(_c_override, str) and _c_override.strip():
+        if isinstance(_c_override, str) and _c_override.strip() and _c_override.strip() != config.CODEX_EVERYWHERE_MODEL_DEFAULT:
             return _c_override.strip()
     except Exception:
         pass
-    return config.get_provider_model()
+    return cfg_model
 
 
 def _runtime_api_key() -> str:
@@ -256,19 +260,33 @@ def validate_classification(raw: Any, expected_ids: set[str]) -> dict:
         "classifier_error_message": None,
     }
     
+    qualifying_icps = {"recruitment_agency", "independent_recruiter"}
+    qualifying_roles = {"owner", "founder", "principal", "headhunter", "independent_recruiter", "unknown"}
+    qualifying_intents = {"buying", "pain", "advice"}
+    
+    icp = raw["icp"]
+    author_role = raw["author_role"]
+    intent_type = raw["intent"]
+    
     is_qualified = (
-        float(icp_score) >= CONFIDENCE_THRESHOLD
-        and float(intent_score) >= 0.50
+        icp in qualifying_icps
+        and author_role in qualifying_roles
+        and intent_type in qualifying_intents
+        and confidence >= CONFIDENCE_THRESHOLD
     )
     
     result["classifier_status"] = "qualified" if is_qualified else "not_qualified"
     
     if not is_qualified:
         reasons = []
-        if float(icp_score) < CONFIDENCE_THRESHOLD:
-            reasons.append(f"icp_score ({icp_score}) < {CONFIDENCE_THRESHOLD}")
-        if float(intent_score) < 0.50:
-            reasons.append(f"intent_score ({intent_score}) < 0.50")
+        if icp not in qualifying_icps:
+            reasons.append(f"icp ({icp}) not in {qualifying_icps}")
+        if author_role not in qualifying_roles:
+            reasons.append(f"author_role ({author_role}) not in {qualifying_roles}")
+        if intent_type not in qualifying_intents:
+            reasons.append(f"intent ({intent_type}) not in {qualifying_intents}")
+        if confidence < CONFIDENCE_THRESHOLD:
+            reasons.append(f"confidence ({confidence:.2f}) < {CONFIDENCE_THRESHOLD}")
         result["rejection_reason"] = " and ".join(reasons)
     else:
         result["rejection_reason"] = None

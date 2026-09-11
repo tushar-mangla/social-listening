@@ -27,8 +27,12 @@ def test_confidence_boundary_and_intent_matrix():
     assert qualification.validate_classification(_valid_item(confidence=0.60), {"p1"})["classifier_status"] == "qualified"
     assert qualification.validate_classification(_valid_item(confidence=0.59), {"p1"})["classifier_status"] == "not_qualified"
     
-    # Low intent score gets rejected regardless of intent string
-    out = qualification.validate_classification(_valid_item(icp_score=0.9, intent_score=0.4), {"p1"})
+    # Unqualifying intent string gets rejected regardless of score
+    out = qualification.validate_classification(_valid_item(icp_score=0.9, intent_score=0.9, intent="job_search"), {"p1"})
+    assert out["classifier_status"] == "not_qualified"
+    
+    # Unqualifying role string gets rejected regardless of score
+    out = qualification.validate_classification(_valid_item(icp_score=0.9, intent_score=0.9, author_role="job_seeker"), {"p1"})
     assert out["classifier_status"] == "not_qualified"
 
 
@@ -74,8 +78,15 @@ def test_error_messages_bounded_and_redacted():
 def test_provider_diagnostics_never_include_secrets(monkeypatch):
     monkeypatch.setenv("CODEX_EVERYWHERE_API_KEY", "super-secret-value")
     monkeypatch.setenv("CODEX_EVERYWHERE_BASE_URL", "https://codex-easy.ai/v1")
+    monkeypatch.setattr(config, "ensure_dotenv_loaded", lambda: None)
     monkeypatch.setenv("CODEX_EVERYWHERE_MODEL", "gpt-5.6-luna")
     monkeypatch.delenv("LLM_MODEL", raising=False)
+    
+    # Also patch classifier shim if loaded
+    import sys
+    if "listening_loop.classifier" in sys.modules:
+        monkeypatch.setattr(sys.modules["listening_loop.classifier"], "LLM_MODEL", "", raising=False)
+        
     diag = qualification.get_provider_diagnostics()
     dumped = json.dumps(diag)
     assert "super-secret-value" not in dumped
@@ -86,6 +97,7 @@ def test_provider_diagnostics_never_include_secrets(monkeypatch):
 
 def test_runtime_config_resolution_without_import_snapshot(monkeypatch):
     monkeypatch.setenv("CODEX_EVERYWHERE_BASE_URL", "https://codex-easy.ai/v1/")
+    monkeypatch.setattr(config, "ensure_dotenv_loaded", lambda: None)
     monkeypatch.setenv("CODEX_EVERYWHERE_MODEL", "gpt-5.6-luna")
     assert config.get_provider_base_url() == "https://codex-easy.ai/v1"
     assert config.get_provider_chat_url() == "https://codex-easy.ai/v1/chat/completions"

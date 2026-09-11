@@ -371,10 +371,10 @@ def get_existing_status_map(post_ids: list[str]) -> dict[str, str]:
 
 
 def get_unsynced_leads() -> list[dict]:
-    """Retrieves qualified-only unsynced leads (durable before Notion)."""
+    """Retrieves all unsynced leads (durable before Notion)."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM leads WHERE synced_to_notion_at IS NULL AND classifier_status = 'qualified'")
+        cursor.execute("SELECT * FROM leads WHERE synced_to_notion_at IS NULL")
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 

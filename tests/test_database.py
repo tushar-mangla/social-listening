@@ -180,13 +180,13 @@ def test_due_retry_selection_respects_cap_and_only_errors(monkeypatch, tmp_path)
     assert "job-seeker" not in due_ids
 
 
-def test_only_qualified_unsynced_rows_are_selected(monkeypatch, tmp_path):
+def test_all_unsynced_rows_are_selected(monkeypatch, tmp_path):
     use_temporary_database(monkeypatch, tmp_path)
     database.add_lead(lead("qualified", classifier_status="qualified", confidence=0.7))
     database.add_lead(lead("job-seeker", classifier_status="not_qualified", confidence=0.9))
     database.add_lead(lead("provider-error", classifier_status="provider_error", classifier_error_category="network"))
 
-    assert [row["post_id"] for row in database.get_unsynced_leads()] == ["qualified"]
+    assert set(row["post_id"] for row in database.get_unsynced_leads()) == {"qualified", "job-seeker", "provider-error"}
 
 
 def test_qualified_reaffirmation_does_not_raise_unbound_local(monkeypatch, tmp_path):

@@ -261,3 +261,32 @@ def test_run_opencli_passes_unquoted_conversational_queries_directly(monkeypatch
     assert '"' not in captured[2][3]
     assert "'" not in captured[2][3]
     assert " OR " not in captured[2][3]
+
+def test_fetch_leads_facebook_filters_entity_urls(monkeypatch):
+    now = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        opencli_adapter,
+        "run_opencli",
+        lambda *args: [
+            # Should be filtered (Group root)
+            {"id": "1", "url": "https://www.facebook.com/groups/123456789/", "created_at": now},
+            # Should be filtered (Page profile)
+            {"id": "2", "url": "https://www.facebook.com/AVirtualStaffing", "created_at": now},
+            # Should be kept (Group post)
+            {"id": "3", "url": "https://www.facebook.com/groups/123456789/posts/987654321/", "text": "Valid post", "created_at": now},
+            # Should be kept (Permalink)
+            {"id": "4", "url": "https://www.facebook.com/permalink.php?story_fbid=123", "text": "Valid post", "created_at": now},
+            # Should be kept (User post)
+            {"id": "5", "url": "https://www.facebook.com/user/123", "text": "Valid user post", "created_at": now},
+            # Should be kept (story.php)
+            {"id": "6", "url": "https://www.facebook.com/story.php?story_fbid=123", "text": "Valid story", "created_at": now},
+        ],
+    )
+    result = opencli_adapter.fetch_leads("facebook", "test", 24)
+    ids = [r["post_id"] for r in result]
+    assert "1" not in ids
+    assert "2" not in ids
+    assert "3" in ids
+    assert "4" in ids
+    assert "5" in ids
+    assert "6" in ids

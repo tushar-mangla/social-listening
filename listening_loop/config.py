@@ -59,14 +59,22 @@ RETRY_MAX_DELAY_SECONDS = 3600
 CONFIDENCE_THRESHOLD = 0.60
 
 # Platforms searched in order for each configured query.
-PLATFORMS = ["reddit", "twitter"]
+PLATFORMS = ["reddit", "twitter", "facebook"]
 
 # Randomized pacing and bounded rate-limit recovery for discovery searches.
 INTER_QUERY_SLEEP_MIN = 3.0
 INTER_QUERY_SLEEP_MAX = 7.0
 RATE_LIMIT_BACKOFF_MIN = 60.0
-RATE_LIMIT_BACKOFF_MAX = 90.0
-MAX_RATE_LIMIT_RETRIES = 1
+RATE_LIMIT_BACKOFF_MAX = 300.0
+MAX_RATE_LIMIT_RETRIES = 3
+
+# Fetch retry constants
+FETCH_RETRY_BACKOFF_MIN = 15.0
+FETCH_RETRY_BACKOFF_MAX = 30.0
+MAX_FETCH_RETRIES = 1
+
+# Platforms that use retrieved_at when posted_at is missing.
+TIMESTAMP_FALLBACK_PLATFORMS = ("facebook",)
 
 # Descriptive aliases retained for callers that use the plan's long names.
 DISCOVERY_QUERY_JITTER_MIN_SECONDS = INTER_QUERY_SLEEP_MIN
@@ -79,32 +87,52 @@ DISCOVERY_RATE_LIMIT_MAX_RETRIES = MAX_RATE_LIMIT_RETRIES
 # Do NOT mix employer hiring-intent communities into this pipeline.
 # r/SaaS, r/startups → TREND_SUBREDDITS only (employer/developer audience, not agency owners).
 LEAD_SUBREDDITS = [
-    "recruiting",
-    "staffing",
-    "Recruitment",
     "freelanceRecruiters",   # highest-signal: independent recruiters discussing BD & client pain
+    "staffingagency",
+    "recruiting",
+    "agencyowners",
 ]
 
 DISCOVERY_QUERIES = {
     "agency_client_acquisition": [
         "recruitment agency getting clients",
         "staffing agency client acquisition",
-        "recruitment business new business",
     ],
     "agency_pipeline_pain": [
         "recruitment agency need more clients",
-        "staffing agency pipeline is dry",
-        "recruitment business job flow",
+        "staffing agency pipeline dry",
     ],
     "agency_outbound": [
         "recruitment agency cold email",
-        "staffing agency linkedin outreach",
-        "recruitment business outbound sales",
+        "recruitment agency outbound sales",
     ],
     "agency_operations": [
-        "recruitment agency candidate database",
         "staffing agency ATS automation",
-        "recruitment agency CRM automation",
+        "recruitment agency CRM",
+    ],
+}
+
+# Facebook feed is fetched once per run (no search queries needed — the news feed
+# surfaces posts from joined groups and followed pages already curated to the user's
+# account). FACEBOOK_FEED_LIMIT controls how many posts are pulled per run.
+FACEBOOK_FEED_LIMIT = 25
+
+# FACEBOOK_QUERIES is retained for reference / testing; the live pipeline uses feed.
+FACEBOOK_QUERIES = {
+    "agency_client_acquisition": [
+        "how to get staffing clients",
+        "recruitment agency getting new clients",
+    ],
+    "agency_pipeline_pain": [
+        "struggling to get clients recruitment",
+    ],
+    "agency_outbound": [
+        "cold email tips for recruiters",
+        "recruiter cold outreach advice",
+    ],
+    "agency_operations": [
+        "recommendations for recruitment ATS",
+        "best CRM for staffing agency",
     ],
 }
 

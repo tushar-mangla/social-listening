@@ -21,21 +21,15 @@ def lead(post_id, content="My staffing agency needs candidate matching automatio
     }
 
 
-def test_keyword_gate_rejects_job_seeker_before_provider_call():
-    assert not run.is_qualified_candidate(lead("job", "Looking for a job and updating my resume"))
-    assert not run.is_qualified_candidate(lead("advice", "How should an internal recruiter improve resume advice?"))
+def test_keyword_gate_accepts_all_posts_with_content():
+    assert run.is_qualified_candidate(lead("job", "Looking for a job and updating my resume"))
+    assert run.is_qualified_candidate(lead("advice", "How should an internal recruiter improve resume advice?"))
     assert run.is_qualified_candidate(lead("agency"))
 
 
-def test_excluded_keyword_short_circuits_provider(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        qualification, "classify_posts", lambda posts: calls.append(posts) or []
-    )
-    # Excluded content never reaches classify_and_store in main; direct gate check:
+def test_excluded_keyword_does_not_short_circuit_provider():
     excluded = lead("ex", "looking for a job, hire me please")
-    assert run.is_qualified_candidate(excluded) is False
-    assert calls == []
+    assert run.is_qualified_candidate(excluded) is True
 
 
 def test_enrich_and_persist_retains_provider_failure(monkeypatch):
@@ -197,13 +191,13 @@ def test_main_runs_all_queries_unscoped_for_non_reddit_platform(monkeypatch):
 def test_rate_limit_cooldown_returns_sampled_float(monkeypatch):
     sleeps = []
     monkeypatch.setattr(run, "_sleep_for", sleeps.append)
-    cooldown = run._rate_limit_cooldown()
+    cooldown = run._rate_limit_cooldown(1)
     assert isinstance(cooldown, float)
     assert config.RATE_LIMIT_BACKOFF_MIN <= cooldown <= config.RATE_LIMIT_BACKOFF_MAX
     assert sleeps == [cooldown]
 
 
-def test_rate_limit_retries_once_then_halts_only_that_platform(monkeypatch, caplog):
+def test_rate_limit_retries_then_halts_only_that_platform(monkeypatch, caplog):
     calls = []
     sleeps = []
     attempts = {"reddit": 0}
@@ -216,6 +210,7 @@ def test_rate_limit_retries_once_then_halts_only_that_platform(monkeypatch, capl
         return []
 
     monkeypatch.setattr(run.config, "DISCOVERY_QUERIES", {"family": ["query"]})
+    monkeypatch.setattr(run.config, "FACEBOOK_QUERIES", {"family": ["query"]})
     monkeypatch.setattr(run.config, "PLATFORMS", ["reddit", "twitter"])
     monkeypatch.setattr(run.config, "LEAD_SUBREDDITS", ["staffing"])
     monkeypatch.setattr(run.opencli_adapter, "fetch_leads", fetch)
@@ -228,14 +223,17 @@ def test_rate_limit_retries_once_then_halts_only_that_platform(monkeypatch, capl
     with caplog.at_level("WARNING"):
         run.main()
 
-    assert attempts["reddit"] == 2
-    assert [platform for platform, _, _ in calls] == ["reddit", "reddit", "twitter"]
-    assert len(sleeps) == 4
-    # Deterministic sequence: pace -> cooldown -> pace -> pace
+    assert attempts["reddit"] == 4
+    assert [platform for platform, _, _ in calls] == ["reddit", "reddit", "reddit", "reddit", "twitter"]
+    assert len(sleeps) == 8
     assert 3 <= sleeps[0] <= 7
-    assert 60 <= sleeps[1] <= 90
+    assert 60 <= sleeps[1] <= 300
     assert 3 <= sleeps[2] <= 7
-    assert 3 <= sleeps[3] <= 7
+    assert 60 <= sleeps[3] <= 300
+    assert 3 <= sleeps[4] <= 7
+    assert 60 <= sleeps[5] <= 300
+    assert 3 <= sleeps[6] <= 7
+    assert 3 <= sleeps[7] <= 7
     assert any(f"Rate limited on reddit. Waiting {sleeps[1]:.1f}s cooldown before retry..." in r.message for r in caplog.records)
 
 

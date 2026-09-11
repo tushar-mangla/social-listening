@@ -85,15 +85,15 @@ def test_job_seekers_direct_employers_and_advice_threads_are_not_qualified():
         classification(icp="not_icp", author_role="job_seeker", confidence=0.1),
         classification(icp="not_icp", author_role="employer", intent="buying", confidence=0.2),
         classification(icp="not_icp", author_role="internal_recruiter", intent="advice", confidence=0.3),
-        # low intent score despite high icp
-        classification(icp="recruitment_agency", author_role="developer", intent="buying", icp_score=0.9, intent_score=0.2),
-        classification(icp="recruitment_agency", author_role="freelancer", intent="pain", icp_score=0.2, intent_score=0.9),
-        # low intent score for advice
-        classification(icp="recruitment_agency", author_role="owner", intent="advice", icp_score=0.9, intent_score=0.3),
+        # Unqualifying role despite high confidence
+        classification(icp="recruitment_agency", author_role="developer", intent="buying", confidence=0.9),
+        classification(icp="recruitment_agency", author_role="freelancer", intent="pain", confidence=0.9),
+        # low confidence for advice
+        classification(icp="recruitment_agency", author_role="owner", intent="advice", icp_score=0.8, intent_score=0.3),
         classification(icp="recruitment_agency", author_role="owner", intent="job_search", icp_score=0.9, intent_score=0.1),
-        # below icp threshold
-        classification(icp="recruitment_agency", author_role="owner", intent="buying", icp_score=0.59, intent_score=0.9),
-        classification(icp="not_icp", author_role="owner", intent="buying", icp_score=0.4, intent_score=0.9),
+        # below confidence threshold
+        classification(icp="recruitment_agency", author_role="owner", intent="buying", icp_score=0.5, intent_score=0.6),
+        classification(icp="not_icp", author_role="owner", intent="buying", icp_score=0.5, intent_score=0.5),
     ):
         assert classifier.validate_classification(output, {"post-1"})["classifier_status"] == "not_qualified"
 

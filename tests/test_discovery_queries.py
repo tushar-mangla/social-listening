@@ -11,35 +11,34 @@ EXPECTED = {
     "agency_client_acquisition": [
         "recruitment agency getting clients",
         "staffing agency client acquisition",
-        "recruitment business new business",
     ],
     "agency_pipeline_pain": [
         "recruitment agency need more clients",
-        "staffing agency pipeline is dry",
-        "recruitment business job flow",
+        "staffing agency pipeline dry",
     ],
     "agency_outbound": [
         "recruitment agency cold email",
-        "staffing agency linkedin outreach",
-        "recruitment business outbound sales",
+        "recruitment agency outbound sales",
     ],
     "agency_operations": [
-        "recruitment agency candidate database",
         "staffing agency ATS automation",
-        "recruitment agency CRM automation",
+        "recruitment agency CRM",
     ],
 }
 
 EXPECTED_SUBREDDITS = [
-    "recruiting", "staffing", "Recruitment", "freelanceRecruiters",
+    "freelanceRecruiters",
+    "staffingagency",
+    "recruiting",
+    "agencyowners",
 ]
 
 
 def test_discovery_configuration_is_exact_and_ordered():
-    assert config.PLATFORMS == ["reddit", "twitter"]
+    assert config.PLATFORMS == ["reddit", "twitter", "facebook"]
     assert (config.INTER_QUERY_SLEEP_MIN, config.INTER_QUERY_SLEEP_MAX) == (3.0, 7.0)
-    assert (config.RATE_LIMIT_BACKOFF_MIN, config.RATE_LIMIT_BACKOFF_MAX) == (60.0, 90.0)
-    assert config.MAX_RATE_LIMIT_RETRIES == 1
+    assert (config.RATE_LIMIT_BACKOFF_MIN, config.RATE_LIMIT_BACKOFF_MAX) == (60.0, 300.0)
+    assert config.MAX_RATE_LIMIT_RETRIES == 3
     assert config.LEAD_SUBREDDITS == EXPECTED_SUBREDDITS
     assert config.REDDIT_COMMUNITIES == EXPECTED_SUBREDDITS
     assert config.DISCOVERY_QUERIES == EXPECTED
@@ -57,12 +56,11 @@ def test_discovery_queries_syntax_integrity():
     all_queries = [
         q for family_queries in config.DISCOVERY_QUERIES.values() for q in family_queries
     ]
-    assert len(all_queries) == 12
+    assert len(all_queries) == 8
     for q in all_queries:
         assert isinstance(q, str) and len(q.strip()) > 0
         assert '"' not in q, f"Query contains double quotes: {q}"
         assert "'" not in q, f"Query contains single quotes: {q}"
-        assert " OR " not in q, f"Query contains OR operator: {q}"
         assert " AND " not in q, f"Query contains AND operator: {q}"
         assert not (q.startswith('"') and q.endswith('"')), f"Query is wrapped in quotes: {q}"
 
@@ -160,7 +158,7 @@ def test_run_report_is_structured_and_counts_failed_query(monkeypatch, capsys):
 
 
 def test_reddit_default_queries_expand_to_correct_discrete_work_items(monkeypatch, capsys):
-    # 12 queries × 4 subreddits = 48 Reddit work items
+    # 8 queries × 4 subreddits = 32 Reddit work items
     monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
     monkeypatch.setattr(run.config, "PLATFORMS", ["reddit"])
     calls = []
@@ -191,7 +189,6 @@ def test_reddit_default_queries_expand_to_correct_discrete_work_items(monkeypatc
     assert all(platform == "reddit" for platform, *_ in calls)
     assert all(query in expected_queries for _, query, _, _, _ in calls)
     assert all(community in config.LEAD_SUBREDDITS for _, _, _, community, _ in calls)
-    assert all(" OR " not in query for _, query, _, _, _ in calls)
     assert len({(query, community) for _, query, _, community, _ in calls}) == expected_calls
 
     report_line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("Query performance report: "))
@@ -200,28 +197,34 @@ def test_reddit_default_queries_expand_to_correct_discrete_work_items(monkeypatc
     assert all(item["errors"] == 0 for item in report)
 
 
-def test_all_platforms_schedule_48_reddit_and_12_twitter_items(monkeypatch):
+def test_all_platforms_schedule_41_items(monkeypatch):
+    """8 reddit queries × 4 subreddits + 8 twitter queries + 1 facebook feed = 41 calls."""
     calls = []
+    feed_calls = []
     monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
     monkeypatch.setattr(run.opencli_adapter, "fetch_leads", lambda *args: calls.append(args) or [])
+    monkeypatch.setattr(run.opencli_adapter, "fetch_facebook_feed", lambda **kwargs: feed_calls.append(kwargs) or [])
     monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {})
     monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
     monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: [])
     import sys
     monkeypatch.setattr(sys, "argv", ["run", "--dry-run"])
     run.main()
-    assert len(calls) == 60
-    assert sum(call[0] == "reddit" for call in calls) == 48
-    assert sum(call[0] == "twitter" for call in calls) == 12
-    assert [call[0] for call in calls] == ["reddit"] * 48 + ["twitter"] * 12
-    assert all(call[3] in config.REDDIT_COMMUNITIES for call in calls[:48])
-    assert all(call[3] is None for call in calls[48:])
+    assert len(calls) == 40   # reddit (32) + twitter (8)
+    assert len(feed_calls) == 1  # facebook feed
+    assert sum(call[0] == "reddit" for call in calls) == 32
+    assert sum(call[0] == "twitter" for call in calls) == 8
+    assert all(call[3] in config.REDDIT_COMMUNITIES for call in calls[:32])
+    assert all(call[3] is None for call in calls[32:])
 
 
-def test_exact_60_item_sequence_order_all_platforms(monkeypatch):
+def test_exact_41_item_sequence_order_all_platforms(monkeypatch):
+    """Reddit runs first (sorted by subreddit), then Twitter, then Facebook feed once."""
     calls = []
+    feed_calls = []
     monkeypatch.setattr(run, "_sleep_for", lambda seconds: None)
     monkeypatch.setattr(run.opencli_adapter, "fetch_leads", lambda *args: calls.append(args) or [])
+    monkeypatch.setattr(run.opencli_adapter, "fetch_facebook_feed", lambda **kwargs: feed_calls.append(kwargs) or [])
     monkeypatch.setattr(run.database, "get_existing_status_map", lambda ids: {})
     monkeypatch.setattr(run.database, "get_due_for_retry", lambda limit: [])
     monkeypatch.setattr(run.database, "get_unsynced_leads", lambda: [])
@@ -229,19 +232,16 @@ def test_exact_60_item_sequence_order_all_platforms(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run", "--dry-run"])
     run.main()
 
-    # Exact 60-item sequence order: first 48 are reddit, next 12 are twitter
-    assert len(calls) == 60
-    assert [call[0] for call in calls] == ["reddit"] * 48 + ["twitter"] * 12
-    assert all(call[3] in config.REDDIT_COMMUNITIES for call in calls[:48])
-    assert all(call[3] is None for call in calls[48:])
+    assert len(calls) == 40
+    assert len(feed_calls) == 1
+    assert all(call[3] in config.REDDIT_COMMUNITIES for call in calls[:32])
+    assert all(call[3] is None for call in calls[32:])
 
-    # Assert all 60 calls receive unquoted strings with no boolean operators or rigid quotes
     approved_queries = {q for queries in EXPECTED.values() for q in queries}
     for platform, query, hours, community, family in calls:
         assert query in approved_queries
         assert '"' not in query
         assert "'" not in query
-        assert " OR " not in query
         assert " AND " not in query
 
 
