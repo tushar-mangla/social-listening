@@ -45,10 +45,10 @@ _LEGACY_MODEL_VARS = ("LLM_MODEL",)
 _LEGACY_API_KEY_VARS = ("LLM_API_KEY",)
 
 # Bounded pipeline constants (covered by tests).
-INTENT_BATCH_SIZE = 16
-CLASSIFICATION_BATCH_CAP = 64
-LLM_TIMEOUT_SECONDS = 30
-MAX_POST_CONTENT_LENGTH = 4000
+INTENT_BATCH_SIZE = int(os.getenv("INTENT_BATCH_SIZE", "25"))
+CLASSIFICATION_BATCH_CAP = int(os.getenv("CLASSIFICATION_BATCH_CAP", "64"))
+LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
+MAX_POST_CONTENT_LENGTH = int(os.getenv("MAX_POST_CONTENT_LENGTH", "1000"))
 ERROR_MESSAGE_LIMIT = 300
 MAX_CONSECUTIVE_PROVIDER_FAILURES = 3
 MAX_CLASSIFICATION_ATTEMPTS = 5
@@ -56,7 +56,29 @@ RETRY_BASE_DELAY_SECONDS = 60
 RETRY_MAX_DELAY_SECONDS = 3600
 
 # Confidence threshold for ICP qualification.
-CONFIDENCE_THRESHOLD = 0.60
+CONFIDENCE_THRESHOLD = 0.75
+
+# Intent priority ranking (for separate lead scoring, not ICP gating)
+INTENT_PRIORITY = {
+    "buying": 5,
+    "solution_seeking": 5,
+    "pain": 4,
+    "advice": 3,
+    "discussion": 2,
+    "none": 1,
+}
+
+# Deterministic obvious noise keywords (job seekers, resume review)
+OBVIOUS_NOISE_KEYWORDS = (
+    "looking for a job",
+    "open to work",
+    "looking for internship",
+    "please review my resume",
+    "seeking employment",
+    "looking for work",
+    "seeking a job",
+    "seeking internship",
+)
 
 # Platforms searched in order for each configured query.
 PLATFORMS = ["reddit", "twitter", "facebook"]

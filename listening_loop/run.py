@@ -50,7 +50,7 @@ def _dedupe_posts(posts: list[dict]) -> list[dict]:
     seen: set[str] = set()
     unique: list[dict] = []
     for post in posts:
-        pid = str(post.get("post_id") or "")
+        pid = str(post.get("post_id") or post.get("id") or "")
         if not pid or pid in seen:
             continue
         seen.add(pid)
@@ -85,6 +85,7 @@ def _retry_post_from_row(row: dict) -> dict:
         "url": row.get("url"),
         "posted_at": row.get("posted_at"),
         "author": row.get("author") if "author" in row else None,
+        "author_bio": row.get("author_bio") or row.get("bio"),
     }
 
 
@@ -92,6 +93,7 @@ def classify_and_store(leads: list[dict], outcome_callback=None) -> int:
     """Stage 2 + persistence: classify survivors, degrade gracefully, store first.
 
     - Caps the per-run classification batch.
+    - Applies lightweight deterministic noise filter for obvious job seekers/resume reviews.
     - Resets per-run consecutive-failure tracking, then after bounded
       consecutive provider failures uses keyword-only fallback for the
       remaining candidates without calling the provider.
@@ -105,8 +107,8 @@ def classify_and_store(leads: list[dict], outcome_callback=None) -> int:
     leads = _dedupe_posts(leads)
     if not leads:
         return 0
-    cap = config.CLASSIFICATION_BATCH_CAP
-    batch_size = config.INTENT_BATCH_SIZE
+    cap = getattr(config, "CLASSIFICATION_BATCH_CAP", 64)
+    batch_size = getattr(config, "INTENT_BATCH_SIZE", 25)
     candidates = list(leads[:cap])
     if len(leads) > cap:
         print(f"Batch cap: processing {cap} of {len(leads)} candidates this run.")
@@ -116,8 +118,40 @@ def classify_and_store(leads: list[dict], outcome_callback=None) -> int:
     classified_total = 0
     fallback_total = 0
 
-    for start in range(0, len(candidates), batch_size):
-        batch = candidates[start:start + batch_size]
+    # Separate candidates: obvious deterministic noise vs LLM candidates
+    to_llm: list[dict] = []
+    for candidate in candidates:
+        is_noise, reason = qualification.is_obvious_jobseeker_noise(candidate)
+        if is_noise:
+            outcome = {
+                **candidate,
+                "post_id": str(candidate.get("post_id") or candidate.get("id")),
+                "classifier_status": "not_qualified",
+                "icp": "no",
+                "score": 0.0,
+                "confidence": 0.0,
+                "role": "job_seeker",
+                "author_role": "job_seeker",
+                "problem": "none",
+                "intent": "none",
+                "intent_type": "none",
+                "reason": reason,
+                "summary": reason,
+                "one_line": reason,
+                "rejection_reason": reason,
+                "classifier_error_category": None,
+                "classifier_error_message": None,
+            }
+            if outcome_callback:
+                outcome_callback(outcome)
+            classified_total += 1
+            if database.add_lead(outcome):
+                inserted += 1
+        else:
+            to_llm.append(candidate)
+
+    for start in range(0, len(to_llm), batch_size):
+        batch = to_llm[start : start + batch_size]
         if qualification.should_use_keyword_fallback():
             for post in batch:
                 outcome = qualification.build_keyword_fallback(post)
@@ -128,17 +162,15 @@ def classify_and_store(leads: list[dict], outcome_callback=None) -> int:
                 if database.add_lead(outcome):
                     inserted += 1
             continue
+
         outcomes = qualification.classify_posts(batch)
         for outcome in outcomes:
             if outcome_callback:
                 outcome_callback(outcome)
             classified_total += 1
-            if outcome.get("classifier_status") == "provider_error":
-                # classify_posts already bumped the consecutive counter per batch;
-                # fallback for subsequent batches is handled at loop top.
-                # Sanitized diagnostic so stdout visibly shows provider error status.
+            if outcome.get("classifier_status") in ("provider_error", "classification_error"):
                 print(
-                    "[classification warning] Provider error: "
+                    "[classification warning] Provider/Classifier error: "
                     f"{_safe_error(outcome.get('classifier_error_message'))} "
                     f"(post {_safe_error(outcome.get('post_id'))})"
                 )
@@ -146,8 +178,9 @@ def classify_and_store(leads: list[dict], outcome_callback=None) -> int:
                 fallback_total += 1
             if database.add_lead(outcome):
                 inserted += 1
+
         if qualification.should_use_keyword_fallback():
-            remaining = len(candidates) - (start + batch_size)
+            remaining = len(to_llm) - (start + batch_size)
             if remaining > 0:
                 print(
                     "Provider failures reached the bounded limit; "
@@ -161,29 +194,9 @@ def classify_and_store(leads: list[dict], outcome_callback=None) -> int:
     )
     return inserted
 
-def main():
-    """Main entrypoint for the social listening loop."""
-    parser = argparse.ArgumentParser(description="Social listening tool for recruitment leads.")
-    parser.add_argument(
-        "--hours",
-        type=int,
-        default=config.DEFAULT_LOOKBACK_HOURS,
-        help="Lookback window in hours."
-    )
-    parser.add_argument(
-        "--platform",
-        type=str,
-        choices=config.PLATFORMS + ['all'],
-        default="all",
-        help="Platform to search on."
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Fetch leads and add to local DB, but do not sync to Notion."
-    )
-    args = parser.parse_args()
 
+def run_once(args):
+    """Execute a single social listening and qualification run."""
     print(f"Starting social listening run at {datetime.now().isoformat()}")
     print(f"Configuration: hours={args.hours}, platform={args.platform}, dry_run={args.dry_run}")
     try:
@@ -195,7 +208,7 @@ def main():
     except Exception as exc:
         print(f"Provider diagnostics unavailable: {_safe_error(exc)}")
 
-    platforms_to_search = config.PLATFORMS if args.platform == 'all' else [args.platform]
+    platforms_to_search = config.PLATFORMS if args.platform == "all" else [args.platform]
 
     new_leads_count = 0
     seen_post_ids: set[str] = set()
@@ -207,6 +220,7 @@ def main():
         "stage1_passed": 0,
         "sent_to_llm": 0,
         "llm_qualified": 0,
+        "llm_needs_enrichment": 0,
         "llm_rejected": 0,
         "added_to_db": 0,
         "database_errors": 0,
@@ -218,8 +232,6 @@ def main():
         record["errors"] += 1
         print(f"Discovery query failed: {_safe_error(exc)}")
 
-    # Keep each query/community invocation observable and independently
-    # recoverable. First-seen provenance wins when posts overlap.
     consecutive_discovery_errors = 0
     max_consecutive_discovery_errors = 4
     halted_platforms: set[str] = set()
@@ -228,7 +240,7 @@ def main():
         if platform in halted_platforms:
             continue
 
-        # ── Facebook: fetch news feed once (actual post content) ──────────────────
+        # ── Facebook: fetch news feed once ──────────────────────────────────────
         if platform == "facebook":
             feed_record = {
                 "platform": "facebook",
@@ -275,7 +287,6 @@ def main():
                 feed_record["errors"] += 1
             _pace_between_attempts()
             continue
-        # ─────────────────────────────────────────────────────────────────────────
 
         queries_dict = config.DISCOVERY_QUERIES
         for query_family, queries in queries_dict.items():
@@ -333,7 +344,6 @@ def main():
                             fetched = None
                             break
                         except opencli_adapter.OpenCLIAuthenticationError as exc:
-                            # Actionable guidance
                             print(
                                 f"\n[auth error] Platform {platform} requires authentication. "
                                 f"Please run 'opencli {platform} login' or ensure session cookies (e.g. c_user) are present.\n"
@@ -347,7 +357,7 @@ def main():
                             if attempts <= getattr(config, "MAX_FETCH_RETRIES", 1):
                                 cooldown = random.uniform(
                                     getattr(config, "FETCH_RETRY_BACKOFF_MIN", 15.0),
-                                    getattr(config, "FETCH_RETRY_BACKOFF_MAX", 30.0)
+                                    getattr(config, "FETCH_RETRY_BACKOFF_MAX", 30.0),
                                 )
                                 _sleep_for(cooldown)
                                 print(
@@ -368,10 +378,10 @@ def main():
                     if fetched is None:
                         if consecutive_discovery_errors >= max_consecutive_discovery_errors:
                             print(
-                                f"\n[discovery warning] {consecutive_discovery_errors} consecutive queries failed. "
-                                "Halting discovery early to avoid worsening rate limits.\n"
+                                f"\n[discovery warning] {consecutive_discovery_errors} consecutive queries failed for {platform}. "
+                                f"Halting {platform} early to avoid worsening rate limits while continuing other platforms.\n"
                             )
-                            halted_platforms.update(platforms_to_search)
+                            halted_platforms.add(platform)
                         continue
                     try:
                         record["posts_retrieved"] = len(fetched)
@@ -394,23 +404,34 @@ def main():
     try:
         stored = database.get_existing_status_map([str(l.get("post_id")) for l in discovery_leads])
     except Exception:
-        # Status verification protects terminal rows from being reclassified.
-        # Do not expose database exception details in run logs.
         print("Database status lookup unavailable; skipping unverified discovered posts.")
         run_metrics["database_errors"] += 1
         run_metrics["classification_skipped_database_status"] += len(discovery_leads)
-        fresh_leads = []
-    else:
-        fresh_leads = [l for l in discovery_leads if str(l.get("post_id")) not in stored]
-    if len(fresh_leads) != len(discovery_leads):
-        print(f"Skipping {len(discovery_leads) - len(fresh_leads)} already-stored post(s) with prior status.")
+        stored = {}
+
+    # Candidates ready for classification: fresh posts or existing posts with pending status
+    fresh_leads = [
+        l
+        for l in discovery_leads
+        if stored.get(str(l.get("post_id"))) in (None, "", "pending", "unclassified")
+    ]
+    if len(discovery_leads) != len(fresh_leads):
+        print(f"Skipping {len(discovery_leads) - len(fresh_leads)} already-stored post(s) with prior terminal status.")
+
+    # Save all newly discovered leads into the database with classifier_status = 'pending'
+    # so they form a durable pending queue and are never lost if beyond the batch cap.
+    for disc_lead in discovery_leads:
+        try:
+            pid = str(disc_lead.get("post_id") or "")
+            if pid and not database.lead_exists(pid):
+                database.add_lead({**disc_lead, "classifier_status": "pending"})
+        except Exception as exc:
+            print(f"Warning: could not save pending raw lead: {_safe_error(exc)}")
 
     retry_posts: list[dict] = []
     try:
         remaining_cap = max(0, config.CLASSIFICATION_BATCH_CAP - len(fresh_leads))
         if remaining_cap > 0:
-            # A discovered post can be an existing retryable row. Its presence
-            # in discovery must not suppress the due retry row.
             retry_post_ids: set[str] = set()
             for row in database.get_due_for_retry(limit=remaining_cap):
                 pid = str(row.get("post_id"))
@@ -421,22 +442,34 @@ def main():
     except Exception as exc:
         print(f"Retry selection unavailable, continuing with fresh candidates: {_safe_error(exc)}")
 
-    leads = _dedupe_posts((fresh_leads + retry_posts)[:config.CLASSIFICATION_BATCH_CAP])
+    all_candidates = _dedupe_posts(fresh_leads + retry_posts)
+    leads = all_candidates[: config.CLASSIFICATION_BATCH_CAP]
 
     def record_outcome(outcome: dict) -> None:
         status = outcome.get("classifier_status")
         if status == "qualified":
             run_metrics["llm_qualified"] += 1
+        elif status == "needs_enrichment":
+            run_metrics["llm_needs_enrichment"] += 1
         elif status == "not_qualified":
             run_metrics["llm_rejected"] += 1
             reason = outcome.get("rejection_reason")
             if reason:
                 run_metrics["rejection_reasons"][reason] = run_metrics["rejection_reasons"].get(reason, 0) + 1
-            
-        provenance = (outcome.get("platform"), outcome.get("community"),
-                      outcome.get("query_family"), outcome.get("exact_query"))
+
+        provenance = (
+            outcome.get("platform"),
+            outcome.get("community"),
+            outcome.get("query_family"),
+            outcome.get("exact_query"),
+        )
         for record in query_report:
-            if (record["platform"], record["community"], record["query_family"], record["exact_query"]) == provenance:
+            if (
+                record["platform"],
+                record["community"],
+                record["query_family"],
+                record["exact_query"],
+            ) == provenance:
                 if status == "qualified":
                     record["luna_qualified"] += 1
                 elif status == "not_qualified":
@@ -445,7 +478,7 @@ def main():
 
     if leads:
         run_metrics["sent_to_llm"] += len(leads)
-        print(f"Found {len(leads)} keyword candidates. Classifying and storing outcomes...")
+        print(f"Found {len(leads)} candidates for classification. Classifying and storing outcomes...")
         try:
             new_leads_count += classify_and_store(leads, outcome_callback=record_outcome)
             run_metrics["added_to_db"] += new_leads_count
@@ -461,20 +494,16 @@ def main():
         print("\nDry run enabled. Skipping Notion sync.")
         return
 
-    if new_leads_count == 0:
-        print("\nNo new leads to sync to Notion.")
-        # Still check for previously unsynced leads
-
     try:
         unsynced_leads = database.get_unsynced_leads()
     except Exception as exc:
         print(f"\nCould not load unsynced leads: {_safe_error(exc)}")
         return
     if not unsynced_leads:
-        print("\nNo unsynced leads to sync to Notion.")
+        print("\nNo unsynced qualified leads to sync to Notion.")
         return
 
-    print(f"\nFound {len(unsynced_leads)} unsynced leads. Starting sync to Notion...")
+    print(f"\nFound {len(unsynced_leads)} unsynced qualified leads. Starting sync to Notion...")
     try:
         synced_ids = notion_sync.sync_leads_to_notion(unsynced_leads)
     except Exception as exc:
@@ -492,6 +521,65 @@ def main():
         print("\nNo leads were synced to Notion in this run.")
 
     print(f"\nSocial listening run finished at {datetime.now().isoformat()}")
+
+
+def main():
+    """Main entrypoint for the social listening loop."""
+    parser = argparse.ArgumentParser(description="Social listening tool for recruitment leads.")
+    parser.add_argument(
+        "--hours",
+        type=int,
+        default=config.DEFAULT_LOOKBACK_HOURS,
+        help="Lookback window in hours.",
+    )
+    parser.add_argument(
+        "--platform",
+        type=str,
+        choices=config.PLATFORMS + ["all"],
+        default="all",
+        help="Platform to search on.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch leads and add to local DB, but do not sync to Notion.",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Run continuously in the foreground (repeats every --interval seconds).",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=10800,
+        help="Interval between runs in seconds when --loop is enabled (default: 10800 = 3h).",
+    )
+    args = parser.parse_args()
+
+    if not getattr(args, "loop", False):
+        run_once(args)
+    else:
+        interval_secs = getattr(args, "interval", 10800)
+        print(
+            f"Starting social listening loop (repeating every {interval_secs}s / "
+            f"{interval_secs/3600:.1f}h). Press Ctrl+C to stop."
+        )
+        while True:
+            try:
+                run_once(args)
+            except KeyboardInterrupt:
+                print("\nStopping social listening loop.")
+                break
+            except Exception as e:
+                print(f"Run cycle encountered an error: {_safe_error(e)}")
+
+            print(f"\nSleeping for {interval_secs} seconds until next cycle...")
+            try:
+                time.sleep(interval_secs)
+            except KeyboardInterrupt:
+                print("\nStopping social listening loop.")
+                break
 
 
 if __name__ == "__main__":

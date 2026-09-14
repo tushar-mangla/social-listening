@@ -1,17 +1,19 @@
-"""Strict two-stage ICP qualification (Stage 2: LLM).
+"""Strict ICP qualification (Stage 2: LLM).
 
-Stage 1 (keyword pre-filter) lives in ``listening_loop.run``.
-This module implements Stage 2: bounded OpenAI-compatible chat-completions
-requests to the verified Codex Everywhere gateway, strict JSON validation,
-and sanitized diagnostics.
+Given social posts/leads scraped from Twitter/X, Reddit, Facebook, etc.,
+determine whether the AUTHOR belongs to the RecruitmentOS ICP.
 
-Provider (non-secret):
-- Base URL default: https://codex-easy.ai/v1
-- Model default: gpt-5.6-luna (label: codex-everywhere)
-- API key variable: CODEX_EVERYWHERE_API_KEY (from .env at runtime)
+ICP Definition:
+- People who own, lead, operate, or independently work in a recruitment/staffing/executive-search/headhunting agency.
+- Roles: founder, owner, partner, principal, managing director, agency director, independent recruiter/headhunter, or senior agency recruiter involved in BD.
+- NOT ICP: job seekers, candidates, internal recruiters/TA/HR, employers/hiring managers, developers, career coaches, generic agencies, unrelated freelancers.
+- Rule: Recruitment-related content alone does NOT prove ICP. If evidence is insufficient, use "uncertain".
 
-Never log API keys, authorization headers, query-string credentials,
-full post content, or full prompts.
+Classification statuses:
+- qualified: icp == "yes" and score >= 0.75
+- needs_enrichment: icp == "uncertain" or (icp == "yes" and score < 0.75)
+- not_qualified: icp == "no" or other non-qualifying
+- classification_error / provider_error: network/provider/formatting failures (retryable)
 """
 
 from __future__ import annotations
@@ -34,28 +36,28 @@ LLM_TIMEOUT_SECONDS = config.LLM_TIMEOUT_SECONDS
 MAX_POST_CONTENT_LENGTH = config.MAX_POST_CONTENT_LENGTH
 ERROR_MESSAGE_LIMIT = config.ERROR_MESSAGE_LIMIT
 
-ICP_VALUES = {"recruitment_agency", "independent_recruiter", "not_icp"}
-AUTHOR_ROLE_VALUES = {
-    "owner",
-    "founder",
-    "principal",
-    "headhunter",
-    "independent_recruiter",
-    "job_seeker",
-    "internal_recruiter",
-    "hr_generalist",
-    "developer",
-    "employer",
-    "freelancer",
-    "unknown",
+ICP_VALUES = {"yes", "no", "uncertain"}
+PROBLEM_VALUES = {
+    "client_acquisition",
+    "outbound_bd",
+    "lead_gen",
+    "candidate_sourcing",
+    "matching",
+    "ats_crm",
+    "automation",
+    "operations",
     "other",
+    "none",
 }
-INTENT_VALUES = {"buying", "pain", "advice", "job_search", "other"}
-URGENCY_VALUES = {"now", "soon", "later", "unknown"}
-# Strict ICP: unknown is NEVER qualifying.
-QUALIFYING_ROLES = {"owner", "founder", "principal", "headhunter", "independent_recruiter"}
-QUALIFYING_ICPS = {"recruitment_agency", "independent_recruiter"}
-QUALIFYING_INTENTS = {"buying", "pain"}
+INTENT_VALUES = {
+    "buying",
+    "solution_seeking",
+    "pain",
+    "advice",
+    "discussion",
+    "none",
+}
+INTENT_PRIORITY = config.INTENT_PRIORITY
 CONFIDENCE_THRESHOLD = config.CONFIDENCE_THRESHOLD
 
 PROVIDER_LABEL = config.CODEX_EVERYWHERE_PROVIDER_LABEL
@@ -132,6 +134,34 @@ def _failure(post_id: str, status: str, category: str, message: object) -> dict:
     }
 
 
+def is_obvious_jobseeker_noise(post: dict) -> tuple[bool, str]:
+    """Conservative noise filter: obvious job seekers / resume review without agency ownership signals."""
+    content = (post.get("content") or post.get("text") or "").lower()
+    bio = (post.get("author_bio") or post.get("bio") or post.get("author_description") or "").lower()
+
+    # Check if bio has strong agency ownership signals - if so, do NOT filter out deterministically
+    agency_owner_signals = (
+        "recruitment agency",
+        "staffing agency",
+        "executive search",
+        "search firm",
+        "headhunting",
+        "founder",
+        "owner",
+        "partner",
+        "managing director",
+        "agency director",
+    )
+    if any(sig in bio for sig in agency_owner_signals):
+        return False, ""
+
+    for kw in getattr(config, "OBVIOUS_NOISE_KEYWORDS", ()):
+        if kw in content or kw in bio:
+            return True, f"Deterministic pre-filter: obvious job seeker/resume review ('{kw}')"
+
+    return False, ""
+
+
 def _runtime_base_url() -> str:
     """Resolve base URL at call time (env injection friendly, no import snapshot)."""
     override = globals().get("LLM_BASE_URL") or ""
@@ -188,146 +218,219 @@ def _provider_headers() -> dict:
     key = _runtime_api_key()
     if not key:
         return {}
-    return {"Authorization": "Bearer " + key}
+    return {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
 
 
 def _prompt_posts(posts: list[dict]) -> str:
-    compact_posts = [
-        {
-            "id": str(post["post_id"]),
-            "source": post.get("source", ""),
-            "content": (post.get("content") or "")[:MAX_POST_CONTENT_LENGTH],
+    """Minimize payload sent to LLM for classification (id, src, bio, text)."""
+    compact_posts = []
+    max_len = getattr(config, "MAX_POST_CONTENT_LENGTH", 1000)
+    for post in posts:
+        pid = str(post.get("post_id") or post.get("id") or "")
+        src = str(post.get("source") or post.get("src") or "")
+        bio = str(post.get("author_bio") or post.get("bio") or post.get("author_description") or "")[:500]
+        text = str(post.get("content") or post.get("text") or "")[:max_len]
+        compact = {
+            "id": pid,
+            "src": src,
+            "bio": bio,
+            "text": text,
         }
-        for post in posts
-    ]
+        compact_posts.append(compact)
     return json.dumps(compact_posts, ensure_ascii=True, separators=(",", ":"))
 
 
-SYSTEM_PROMPT = """Classify each social post as RecruitmentOS lead evidence. Return only a JSON array.
-Each item must be {"id","icp","author_role","intent","urgency","one_line","icp_score","intent_score"}.
-icp: recruitment_agency, independent_recruiter, or not_icp.
-author_role: owner, founder, principal, headhunter, independent_recruiter, job_seeker, internal_recruiter, hr_generalist, developer, employer, freelancer, unknown, or other.
-intent: buying, pain, advice, job_search, or other. urgency: now, soon, later, or unknown.
-An ICP is ONLY a recruitment/staffing agency founder, owner, principal, headhunter, or independent recruiter discussing BD/client acquisition, candidate sourcing, ATS/matching, or recruitment automation.
-EXCLUDE all of: job seekers, resume advice, internal HR/talent acquisition hiring directly, developers, generic agencies without recruitment-agency evidence, freelancers, employers, and unrelated users.
-icp_score (0..1): How confident are you the author is an owner/founder/director/operator of a recruitment/staffing/search business?
-intent_score (0..1): How confident are you the post indicates a problem RecruitmentOS can solve?"""
+SYSTEM_PROMPT = """You classify social authors for RecruitmentOS.
+
+ICP = people who own, lead, operate, or independently work in a recruitment/staffing/executive-search/headhunting agency.
+
+ICP roles: founder, owner, partner, principal, managing director, agency director, independent recruiter/headhunter, or senior agency recruiter involved in BD.
+
+NOT ICP: job seekers, candidates, internal recruiters/TA/HR, employers/hiring managers, developers, career coaches, generic agencies, unrelated freelancers.
+
+Recruitment-related content alone does NOT prove ICP. If evidence is insufficient, use "uncertain".
+
+Also extract useful commercial signals when present.
+
+Return ONLY JSON:
+[
+ {
+  "id":"",
+  "icp":"yes|no|uncertain",
+  "score":0.0,
+  "role":"",
+  "problem":"client_acquisition|outbound_bd|lead_gen|candidate_sourcing|matching|ats_crm|automation|operations|other|none",
+  "intent":"buying|solution_seeking|pain|advice|discussion|none",
+  "reason":""
+ }
+]
+
+score = confidence that the AUTHOR belongs to the RecruitmentOS ICP.
+
+Never invent information."""
 
 
 def validate_classification(raw: Any, expected_ids: set[str]) -> dict:
+    """Deterministic qualification logic based strictly on author ICP membership."""
     if not isinstance(raw, dict):
-        return _failure("", "unclassified", "invalid_response", "classification item is not an object")
+        return _failure("", "classification_error", "invalid_response", "classification item is not an object")
 
     post_id = raw.get("id")
     if not isinstance(post_id, str) or post_id not in expected_ids:
-        return _failure(str(post_id or ""), "unclassified", "invalid_response", "unknown or missing post id")
+        return _failure(str(post_id or ""), "classification_error", "invalid_response", "unknown or missing post id")
 
-    required_values = {
-        "icp": ICP_VALUES,
-        "author_role": AUTHOR_ROLE_VALUES,
-        "intent": INTENT_VALUES,
-        "urgency": URGENCY_VALUES,
-    }
-    for field, allowed in required_values.items():
-        if raw.get(field) not in allowed:
-            return _failure(post_id, "unclassified", "invalid_response", "invalid " + field)
+    icp = raw.get("icp")
+    if icp not in ICP_VALUES:
+        return _failure(post_id, "classification_error", "invalid_response", f"invalid icp: {icp}")
 
-    icp_score = raw.get("icp_score")
-    if isinstance(icp_score, bool) or not isinstance(icp_score, (int, float)) or not 0 <= icp_score <= 1:
-        return _failure(post_id, "unclassified", "invalid_response", "invalid icp_score")
+    score = raw.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not (0 <= float(score) <= 1):
+        return _failure(post_id, "classification_error", "invalid_response", f"invalid score: {score}")
+    score = float(score)
 
-    intent_score = raw.get("intent_score")
-    if isinstance(intent_score, bool) or not isinstance(intent_score, (int, float)) or not 0 <= intent_score <= 1:
-        return _failure(post_id, "unclassified", "invalid_response", "invalid intent_score")
-        
-    confidence = (icp_score + intent_score) / 2
-    one_line = raw.get("one_line")
-    if not isinstance(one_line, str) or not one_line.strip():
-        return _failure(post_id, "unclassified", "invalid_response", "missing one_line")
+    role = raw.get("role")
+    if not isinstance(role, str):
+        role = str(role or "")
+
+    problem = raw.get("problem")
+    if problem not in PROBLEM_VALUES:
+        if isinstance(problem, str) and problem.lower() in PROBLEM_VALUES:
+            problem = problem.lower()
+        else:
+            return _failure(post_id, "classification_error", "invalid_response", f"invalid problem: {problem}")
+
+    intent = raw.get("intent")
+    if intent not in INTENT_VALUES:
+        if isinstance(intent, str) and intent.lower() in INTENT_VALUES:
+            intent = intent.lower()
+        else:
+            return _failure(post_id, "classification_error", "invalid_response", f"invalid intent: {intent}")
+
+    reason = raw.get("reason")
+    if not isinstance(reason, str):
+        reason = str(reason or "")
+
+    # Qualification Gate:
+    # if icp == "yes" and score >= 0.75: qualified
+    # elif icp == "uncertain" or (icp == "yes" and score < 0.75): needs_enrichment
+    # else: not_qualified
+    threshold = getattr(config, "CONFIDENCE_THRESHOLD", 0.75)
+    if icp == "yes" and score >= threshold:
+        status = "qualified"
+        rejection_reason = None
+    elif icp == "uncertain" or (icp == "yes" and score < threshold):
+        status = "needs_enrichment"
+        rejection_reason = (
+            f"insufficient_evidence (icp={icp}, score={score:.2f})"
+            if icp == "uncertain"
+            else f"low_confidence_yes (score={score:.2f} < {threshold:.2f})"
+        )
+    else:
+        status = "not_qualified"
+        rejection_reason = reason if reason else f"not_icp (icp={icp}, score={score:.2f})"
+
+    priority = INTENT_PRIORITY.get(intent, 1)
 
     result = {
         "post_id": post_id,
-        "icp": raw["icp"],
-        "author_role": raw["author_role"],
-        "intent_type": raw["intent"],
-        "urgency": raw["urgency"],
-        "one_line": one_line.strip()[:1000],
-        "summary": one_line.strip()[:1000],
-        "icp_score": float(icp_score),
-        "intent_score": float(intent_score),
-        "confidence": float(confidence),
+        "classifier_status": status,
+        "icp": icp,
+        "score": score,
+        "confidence": score,  # backwards compatibility
+        "icp_score": score,   # backwards compatibility
+        "intent_score": priority / 5.0,  # backwards compatibility
+        "author_role": role,
+        "role": role,
+        "problem": problem,
+        "intent_type": intent,
+        "intent": intent,
+        "urgency": "now" if intent in ("buying", "pain") else ("soon" if intent in ("solution_seeking", "advice") else "later"),
+        "reason": reason[:1000],
+        "one_line": reason[:1000],
+        "summary": reason[:1000],
+        "lead_priority": priority,
+        "rejection_reason": rejection_reason,
         "classifier_error_category": None,
         "classifier_error_message": None,
     }
-    
-    qualifying_icps = {"recruitment_agency", "independent_recruiter"}
-    qualifying_roles = {"owner", "founder", "principal", "headhunter", "independent_recruiter", "unknown"}
-    qualifying_intents = {"buying", "pain", "advice"}
-    
-    icp = raw["icp"]
-    author_role = raw["author_role"]
-    intent_type = raw["intent"]
-    
-    is_qualified = (
-        icp in qualifying_icps
-        and author_role in qualifying_roles
-        and intent_type in qualifying_intents
-        and confidence >= CONFIDENCE_THRESHOLD
-    )
-    
-    result["classifier_status"] = "qualified" if is_qualified else "not_qualified"
-    
-    if not is_qualified:
-        reasons = []
-        if icp not in qualifying_icps:
-            reasons.append(f"icp ({icp}) not in {qualifying_icps}")
-        if author_role not in qualifying_roles:
-            reasons.append(f"author_role ({author_role}) not in {qualifying_roles}")
-        if intent_type not in qualifying_intents:
-            reasons.append(f"intent ({intent_type}) not in {qualifying_intents}")
-        if confidence < CONFIDENCE_THRESHOLD:
-            reasons.append(f"confidence ({confidence:.2f}) < {CONFIDENCE_THRESHOLD}")
-        result["rejection_reason"] = " and ".join(reasons)
-    else:
-        result["rejection_reason"] = None
-        
     return result
 
 
 def parse_response(payload: Any, expected_ids: set[str]) -> dict[str, dict]:
+    """Parse and validate LLM completion response."""
     try:
-        content = payload["choices"][0]["message"]["content"]
-        items = json.loads(content)
+        if isinstance(payload, str):
+            text = payload.strip()
+            if "data: [DONE]" in text:
+                text = text.split("data: [DONE]")[0].strip()
+            payload = json.loads(text)
+
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            if "data" in payload and isinstance(payload["data"], dict) and "choices" in payload["data"]:
+                choices = payload["data"]["choices"]
+            elif "choices" in payload:
+                choices = payload["choices"]
+            else:
+                raise ValueError("Response payload does not contain choices array")
+
+            content = choices[0]["message"]["content"]
+            if isinstance(content, str):
+                content = content.strip()
+                # Strip markdown JSON fences if present
+                if content.startswith("```"):
+                    lines = content.splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    content = "\n".join(lines).strip()
+                try:
+                    items = json.loads(content)
+                except json.JSONDecodeError:
+                    match = re.search(r"\[.*\]", content, re.DOTALL)
+                    if match:
+                        items = json.loads(match.group(0))
+                    else:
+                        raise
+            elif isinstance(content, list):
+                items = content
+            else:
+                raise ValueError("Unexpected message content format")
+        else:
+            raise ValueError("Unexpected payload format")
+
         if not isinstance(items, list):
-            raise ValueError("response content is not an array")
+            raise ValueError("Response content is not an array")
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        return {post_id: _failure(post_id, "unclassified", "invalid_response", exc) for post_id in expected_ids}
+        return {post_id: _failure(post_id, "classification_error", "invalid_response", exc) for post_id in expected_ids}
 
     seen: set[str] = set()
     for item in items:
-        # Strict batch ID correlation: any non-object, unknown ID, or
-        # duplicate ID invalidates the entire batch.
         if not isinstance(item, dict):
             return {
-                post_id: _failure(post_id, "unclassified", "invalid_response", "batch id mismatch: non-object item")
+                post_id: _failure(post_id, "classification_error", "invalid_response", "batch id mismatch: non-object item")
                 for post_id in expected_ids
             }
-        pid = item.get("id")
-        if not isinstance(pid, str) or pid not in expected_ids or pid in seen:
-            if isinstance(pid, str) and pid in seen:
-                reason = "duplicate classification result"
+        pid = str(item.get("id") or "")
+        if not pid or pid not in expected_ids or pid in seen:
+            if pid in seen:
+                reason = f"duplicate classification result for id {pid}"
             else:
-                reason = "unknown or missing post id"
+                reason = f"unknown or missing post id: {pid}"
             return {
-                post_id: _failure(post_id, "unclassified", "invalid_response", "batch id mismatch: " + reason)
+                post_id: _failure(post_id, "classification_error", "invalid_response", "batch id mismatch: " + reason)
                 for post_id in expected_ids
             }
         seen.add(pid)
+
     if set(seen) != set(expected_ids):
         return {
-            post_id: _failure(post_id, "unclassified", "invalid_response", "batch id mismatch: set mismatch")
+            post_id: _failure(post_id, "classification_error", "invalid_response", "batch id mismatch: set mismatch")
             for post_id in expected_ids
         }
+
     results: dict[str, dict] = {}
     for item in items:
         result = validate_classification(item, expected_ids)
@@ -335,13 +438,15 @@ def parse_response(payload: Any, expected_ids: set[str]) -> dict[str, dict]:
         if not pid:
             continue
         results[pid] = result
+
     for post_id in expected_ids:
-        results.setdefault(post_id, _failure(post_id, "unclassified", "invalid_response", "missing classification result"))
+        results.setdefault(post_id, _failure(post_id, "classification_error", "invalid_response", "missing classification result"))
+
     return results
 
 
 def is_retryable_category(category: str | None) -> bool:
-    """provider_error outcomes are retryable; unclassified malformed rows get bounded retries."""
+    """provider_error outcomes and malformed rows get bounded retries."""
     return category in {
         "missing_configuration",
         "timeout",
@@ -350,6 +455,7 @@ def is_retryable_category(category: str | None) -> bool:
         "provider_error",
         "invalid_response",
         "provider_fallback",
+        "classification_error",
     }
 
 
@@ -375,14 +481,18 @@ def build_keyword_fallback(post: dict, reason: str = "provider fallback after co
 
 
 def _request_batch(posts: list[dict]) -> dict[str, dict]:
-    expected_ids = {str(post["post_id"]) for post in posts}
+    expected_ids = {str(post.get("post_id") or post.get("id")) for post in posts}
     url = _provider_url()
     if not url:
-        for post_id in expected_ids:
-            pass
-        return {post_id: _failure(post_id, "provider_error", "missing_configuration", "provider base URL is not configured") for post_id in expected_ids}
+        return {
+            post_id: _failure(post_id, "provider_error", "missing_configuration", "provider base URL is not configured")
+            for post_id in expected_ids
+        }
     if not _runtime_api_key():
-        return {post_id: _failure(post_id, "provider_error", "missing_configuration", config.CODEX_API_KEY_VAR + " is not configured") for post_id in expected_ids}
+        return {
+            post_id: _failure(post_id, "provider_error", "missing_configuration", config.CODEX_API_KEY_VAR + " is not configured")
+            for post_id in expected_ids
+        }
 
     try:
         response = requests.post(
@@ -411,22 +521,29 @@ def _request_batch(posts: list[dict]) -> dict[str, dict]:
         return {post_id: _failure(post_id, "provider_error", "provider_error", exc) for post_id in expected_ids}
 
     try:
-        return parse_response(response.json(), expected_ids)
+        text = response.text.strip()
+        if "data: [DONE]" in text:
+            text = text.split("data: [DONE]")[0].strip()
+        payload = json.loads(text)
+        return parse_response(payload, expected_ids)
     except (ValueError, json.JSONDecodeError) as exc:
-        return {post_id: _failure(post_id, "unclassified", "invalid_response", exc) for post_id in expected_ids}
+        return {post_id: _failure(post_id, "classification_error", "invalid_response", exc) for post_id in expected_ids}
 
 
 def classify_posts(posts: list[dict]) -> list[dict]:
     """Return one durable classifier outcome for every submitted post."""
     results = []
-    for start in range(0, len(posts), INTENT_BATCH_SIZE):
-        batch = posts[start:start + INTENT_BATCH_SIZE]
+    batch_size = getattr(config, "INTENT_BATCH_SIZE", 25)
+    for start in range(0, len(posts), batch_size):
+        batch = posts[start : start + batch_size]
         outcomes = _request_batch(batch)
         batch_had_provider_error = False
         for post in batch:
-            outcome = outcomes[str(post["post_id"])]
-            if outcome.get("classifier_status") == "provider_error":
-                batch_had_provider_error = True
+            pid = str(post.get("post_id") or post.get("id"))
+            outcome = outcomes.get(pid) or _failure(pid, "classification_error", "invalid_response", "missing outcome")
+            if outcome.get("classifier_status") in ("provider_error", "classification_error"):
+                if outcome.get("classifier_status") == "provider_error":
+                    batch_had_provider_error = True
             results.append({**post, **outcome, "classifier_provider": PROVIDER_LABEL})
         record_provider_outcome(batch_had_provider_error)
     return results
